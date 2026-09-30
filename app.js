@@ -30,6 +30,17 @@ const libelleJour = d => { const x = new Date(d); return x.toDateString() === ne
 const heureListe = d => { const x = new Date(d); return x.toDateString() === new Date().toDateString() ? heureCourte(x) : x.toDateString() === new Date(Date.now() - 864e5).toDateString() ? 'Hier' : x.toLocaleDateString('fr-FR'); };
 
 // Présence « en ligne »
+const champMdp = (ph, ac) => {
+  const input = h('input', { type: 'password', placeholder: ph, autocomplete: ac });
+  const oeil = h('button', { type: 'button', className: 'oeil', title: 'Afficher ou masquer le mot de passe', 'aria-label': 'Afficher ou masquer le mot de passe' }, '👁');
+  oeil.onclick = () => { const cache = input.type === 'password'; input.type = cache ? 'text' : 'password'; oeil.textContent = cache ? '🙈' : '👁'; };
+  return { input, el: h('div', { className: 'mdp' }, input, oeil) };
+};
+function majBadges(nav) {
+  nav = nav || document.querySelector('nav'); if (!nav) return;
+  sb.rpc('mes_conversations').then(r => { const n = (r.data || []).reduce((a, c) => a + (c.muted ? 0 : Number(c.non_lus)), 0); nav.children[2].textContent = n > 0 ? `Messages (${n})` : 'Messages'; });
+  sb.from('notifications').select('id', { count: 'exact', head: true }).eq('read', false).neq('kind', 'message').then(r => { nav.children[3].textContent = r.count > 0 ? `Plus (${r.count})` : 'Plus'; });
+}
 const enLigne = new Set(); let canalPresence = null, canalConv = null, surPresence = null, battementId = null;
 function demarrerPresence() {
   if (canalPresence) return;
@@ -39,23 +50,24 @@ function demarrerPresence() {
   const battement = () => { if (session && profile?.show_online !== false) sb.from('profiles').update({ last_seen_at: new Date().toISOString() }).eq('id', session.user.id); };
   battement(); battementId = setInterval(battement, 60000);
 }
-function arreterPresence() { if (canalPresence) { sb.removeChannel(canalPresence); canalPresence = null; } clearInterval(battementId); enLigne.clear(); }
+function arreterPresence() { if (canalGlobal) { sb.removeChannel(canalGlobal); canalGlobal = null; } if (canalPresence) { sb.removeChannel(canalPresence); canalPresence = null; } clearInterval(battementId); enLigne.clear(); }
 document.addEventListener('visibilitychange', () => {
   if (!canalPresence || profile?.show_online === false) return;
   if (document.hidden) { canalPresence.untrack(); sb.from('profiles').update({ last_seen_at: new Date().toISOString() }).eq('id', session.user.id); }
   else canalPresence.track({ t: Date.now() });
 });
-let session = null, profile = null, tab = 'accueil', groupe = null, conv = null, sous = null;
+let session = null, profile = null, tab = 'accueil', groupe = null, conv = null, sous = null, ecranContact = false;
 
 async function charger() {
   const { data } = await sb.auth.getSession();
   session = data.session;
   profile = null;
   if (session) {
-    const r = await sb.from('profiles').select('*').eq('id', session.user.id).single();
+    const r = await sb.from('profiles').select('id,full_name,avatar_url,bio,church_id,role,status,show_bio,show_church,last_seen_at,show_online,show_phone').eq('id', session.user.id).single();
     profile = r.data;
+    if (profile) profile.phone = (await sb.rpc('mon_telephone')).data;
   }
-  if (session) demarrerPresence(); else arreterPresence();
+  if (session) { demarrerPresence(); demarrerEcoute(); } else arreterPresence();
   afficher();
 }
 sb.auth.onAuthStateChange((_e, s) => { if ((s?.user?.id) !== (session?.user?.id)) charger(); });
@@ -70,14 +82,17 @@ function afficher() {
       h('p', {}, 'Contactez l’administration du ministère.'),
       h('button', { className: 'btn', onclick: () => sb.auth.signOut() }, 'Se déconnecter')));
   }
-  if (tab === 'messages' && conv) { const plein = h('div', { className: 'plein' }); root.append(plein); vueConv().then(v => plein.append(v)); return; }
+  if (tab === 'messages' && conv) { const plein = h('div', { className: 'plein' }); root.append(plein); (ecranContact ? vueContact() : vueConv()).then(v => plein.append(v)); return; }
   const main = h('main');
   const onglets = [['accueil', 'Accueil'], ['communautes', 'Groupes'], ['messages', 'Messages'], ['plus', 'Plus'], ['profil', 'Profil']];
   const nav = h('nav', {}, ...onglets.map(([k, l]) =>
     h('button', { className: tab === k ? 'on' : '', onclick: () => { tab = k; groupe = null; conv = null; sous = null; afficher(); } }, l)));
-  sb.from('notifications').select('id', { count: 'exact', head: true }).eq('read', false).then(r => { if (r.count > 0) nav.children[3].textContent = `Plus (${r.count})`; });
-  sb.rpc('mes_conversations').then(r => { const n = (r.data || []).reduce((a, c) => a + Number(c.non_lus), 0); const b = nav.children[2]; if (n > 0 && b) b.textContent = `Messages (${n})`; });
+  majBadges(nav);
   root.append(h('header', {}, h('h1', {}, 'MNA Connect'), h('small', {}, 'Le réseau de la Nouvelle Alliance')), main, nav);
+  if (tab === 'accueil' && 'Notification' in window && 'PushManager' in window && Notification.permission === 'default' && !sessionStorage.getItem('pushIgnore'))
+    main.append(h('div', { className: 'card epingle' }, h('p', {}, '🔔 Recevoir les messages et annonces même quand l’application est fermée ?'),
+      h('div', { className: 'actions' }, h('button', { className: 'btn primaire', onclick: async () => { try { await activerPush(); } catch (e) { alert(e.message); } afficher(); } }, 'Activer'),
+        h('button', { className: 'btn', onclick: () => { sessionStorage.setItem('pushIgnore', '1'); afficher(); } }, 'Plus tard'))));
   (tab === 'accueil' ? vueFil(null) : tab === 'communautes' ? (groupe ? vueGroupe() : vueGroupes()) : tab === 'messages' ? (conv ? vueConv() : vueMessages()) : tab === 'plus' ? vuePlus() : vueProfil()).then(v => main.append(v));
 }
 
@@ -88,7 +103,7 @@ function vueAuth() {
     const nom = h('input', { placeholder: 'Nom complet', autocomplete: 'name' });
     const email = h('input', { type: 'email', placeholder: 'Adresse e-mail', autocomplete: 'email' });
     const tel = h('input', { type: 'tel', placeholder: inscription ? 'Téléphone (facultatif) : +243 8XX XXX XXX' : 'Numéro : +243 8XX XXX XXX', autocomplete: 'tel' });
-    const mdp = h('input', { type: 'password', placeholder: 'Mot de passe (8 caractères minimum)', autocomplete: inscription ? 'new-password' : 'current-password' });
+    const mdpC = champMdp('Mot de passe (8 caractères minimum)', inscription ? 'new-password' : 'current-password'); const mdp = mdpC.input;
     const msg = h('p', { className: 'erreur' });
     const go = h('button', { className: 'btn primaire', style: 'width:100%' }, inscription ? 'Créer mon compte' : 'Se connecter');
     go.onclick = async () => {
@@ -120,7 +135,7 @@ function vueAuth() {
       h('button', { className: 'btn' + (parTel ? ' primaire' : ''), onclick: () => { parTel = true; dessiner(); } }, 'Téléphone'));
     const bascule = h('button', { className: 'btn lien', onclick: () => { inscription = !inscription; dessiner(); } }, inscription ? 'J’ai déjà un compte' : 'Créer un compte');
     wrap.replaceChildren(h('h1', {}, 'MNA Connect'), h('p', { className: 'sous' }, 'Le réseau de la Nouvelle Alliance'), onglets,
-      inscription ? nom : null, (inscription || !parTel) ? email : null, (inscription || parTel) ? tel : null, mdp, msg, go, h('p', {}, bascule));
+      inscription ? nom : null, (inscription || !parTel) ? email : null, (inscription || parTel) ? tel : null, mdpC.el, msg, go, h('p', {}, bascule));
   };
   dessiner();
   return wrap;
@@ -193,7 +208,7 @@ function carte(p, aime, recharger, urlImage) {
     if (zone.childElementCount) return zone.replaceChildren();
     const c = h('div', { className: 'com' });
     const { data } = await sb.from('comments').select('id,author_id,content,created_at,profiles!comments_author_id_fkey(full_name)').eq('post_id', p.id).order('created_at');
-    (data || []).forEach(x => c.append(h('p', {}, h('span', { className: 'auteur' }, (x.profiles?.full_name || 'Membre') + ' '), x.content, x.author_id !== session.user.id ? h('button', { className: 'btn lien', style: 'min-height:0;padding:0 .5rem;font-size:.8rem', onclick: () => signaler('comment', x.id) }, 'Signaler') : null)));
+    (data || []).forEach(x => c.append(h('p', {}, h('span', { className: 'auteur' }, (x.profiles?.full_name || 'Membre') + ' '), x.content, x.author_id !== session.user.id ? h('button', { className: 'btn lien discret', title: 'Plus d’options', onclick: () => confirm('Signaler ce commentaire à l’administration ?') && signaler('comment', x.id) }, '⋯') : null)));
     const champ = h('input', { placeholder: 'Écrire un commentaire…' });
     const envoi = h('button', { className: 'btn' }, 'Envoyer');
     envoi.onclick = async () => {
@@ -215,7 +230,7 @@ function carte(p, aime, recharger, urlImage) {
   return h('article', { className: 'card' + (p.pinned ? ' epingle' : '') },
     h('div', { className: 'ligne' }, h('div', { className: 'qui' }, av(p.profiles?.avatar_url, p.profiles?.full_name, 40),
       h('div', {}, h('div', { className: 'auteur' }, p.profiles?.full_name || 'Membre'),
-      h('div', { className: 'meta' }, (p.pinned ? 'Épinglé · ' : '') + quand(p.created_at)))), h('div', {}, pin, sup, p.author_id !== session.user.id ? h('button', { className: 'btn lien', onclick: () => signaler('post', p.id) }, 'Signaler') : null)),
+      h('div', { className: 'meta' }, (p.pinned ? 'Épinglé · ' : '') + quand(p.created_at)))), h('div', {}, pin, sup, p.author_id !== session.user.id ? h('button', { className: 'btn lien discret', title: 'Plus d’options', onclick: () => confirm('Signaler cette publication à l’administration ?') && signaler('post', p.id) }, '⋯') : null)),
     p.content ? h('p', { style: 'white-space:pre-wrap' }, p.content) : null,
     urlImage ? h('img', { src: urlImage, className: 'photo', alt: 'Photo de la publication', loading: 'lazy', onclick: () => window.open(urlImage, '_blank') }) : null,
     h('div', { className: 'actions' }, bR, bC), zone);
@@ -255,15 +270,27 @@ async function vueProfil() {
   const vb = h('input', { type: 'checkbox', checked: profile.show_bio });
   const tel = h('input', { type: 'tel', placeholder: '+243 8XX XXX XXX', value: profile.phone || '' });
   const po = h('input', { type: 'checkbox', checked: profile.show_online !== false });
+  const sp = h('input', { type: 'checkbox', checked: !!profile.show_phone });
+  const zoneApp = h('div', { className: 'com' }, h('h3', {}, 'Application et notifications'));
+  const etat = h('p', { className: 'meta' });
+  const majEtat = () => { etat.textContent = !('Notification' in window) ? 'Notifications non prises en charge sur cet appareil.' : Notification.permission === 'granted' ? '✅ Notifications activées sur cet appareil.' : Notification.permission === 'denied' ? '⛔ Notifications bloquées : autorisez-les dans les réglages du navigateur.' : ''; };
+  majEtat();
+  const dejaInstallee = matchMedia('(display-mode: standalone)').matches;
+  zoneApp.append(etat,
+    h('div', { className: 'actions', style: 'flex-wrap:wrap' },
+      h('button', { className: 'btn', onclick: async () => { try { await activerPush(); } catch (e) { alert(e.message); } majEtat(); } }, '🔔 Activer les notifications'),
+      dejaInstallee ? h('span', { className: 'meta' }, '✅ Application installée')
+        : invitation ? h('button', { className: 'btn primaire', onclick: () => invitation.prompt() }, '📲 Installer l’application') : null),
+    !dejaInstallee && !invitation ? h('p', { className: 'meta' }, 'Pour installer : menu ⋮ du navigateur, puis « Installer l’application » ou « Ajouter à l’écran d’accueil ».') : null);
   const msg = h('p', { className: 'ok' });
   const enr = h('button', { className: 'btn primaire' }, 'Enregistrer');
   enr.onclick = async () => {
     const numero = tel.value.trim() ? normaliserTel(tel.value) : null;
     if (tel.value.trim() && !numero) { msg.className = 'erreur'; msg.textContent = 'Numéro invalide : utilisez le format international, ex. +243…'; return; }
-    const { error } = await sb.from('profiles').update({ full_name: nom.value.trim(), bio: bio.value.trim(), show_bio: vb.checked, phone: numero, show_online: po.checked }).eq('id', session.user.id);
+    const { error } = await sb.from('profiles').update({ full_name: nom.value.trim(), bio: bio.value.trim(), show_bio: vb.checked, phone: numero, show_online: po.checked, show_phone: sp.checked }).eq('id', session.user.id);
     msg.className = error ? 'erreur' : 'ok'; msg.textContent = error ? (error.code === '23505' ? 'Ce numéro est déjà utilisé par un autre compte.' : error.message) : 'Profil enregistré';
     if (!error) {
-      profile.full_name = nom.value.trim(); profile.bio = bio.value.trim(); profile.phone = numero; profile.show_online = po.checked;
+      profile.full_name = nom.value.trim(); profile.bio = bio.value.trim(); profile.phone = numero; profile.show_online = po.checked; profile.show_phone = sp.checked;
       if (!po.checked) { canalPresence?.untrack(); sb.from('profiles').update({ last_seen_at: null }).eq('id', session.user.id); } else canalPresence?.track({ t: Date.now() });
     }
   };
@@ -294,6 +321,8 @@ async function vueProfil() {
     h('label', {}, 'Téléphone (pour vous connecter avec votre numéro)'), tel,
     h('label', { className: 'check' }, vb, 'Afficher ma biographie aux autres membres'),
     h('label', { className: 'check', style: 'margin-top:.6rem' }, po, 'Afficher quand je suis en ligne et ma dernière connexion'),
+    h('label', { className: 'check', style: 'margin-top:.6rem' }, sp, 'Montrer mon numéro aux membres avec qui je discute'),
+    zoneApp,
     h('p'), msg, enr, ' ', h('button', { className: 'btn', onclick: () => sb.auth.signOut() }, 'Se déconnecter'));
 }
 
@@ -317,7 +346,7 @@ async function vueMessages() {
   const { data: us } = await sb.from('profiles').select('id,full_name,avatar_url').neq('id', session.user.id).eq('status', 'actif').order('full_name');
   const lm = h('div', { className: 'card' }, h('h3', {}, 'Écrire à un membre'));
   (us || []).forEach(u => lm.append(h('div', { className: 'ligne com' }, h('span', { className: 'qui' }, av(u.avatar_url, u.full_name, 34), u.full_name || 'Sans nom'),
-    h('span', {}, h('button', { className: 'btn lien', onclick: () => signaler('user', u.id) }, 'Signaler'), h('button', { className: 'btn', onclick: async () => {
+    h('span', {}, h('button', { className: 'btn', onclick: async () => {
       const r = await sb.rpc('start_conversation', { autre: u.id });
       if (r.error) return alert(r.error.message);
       conv = { conversation_id: r.data, autre_id: u.id, autre_nom: u.full_name, autre_avatar: u.avatar_url }; afficher();
@@ -332,14 +361,14 @@ const resume = m => m.deleted_at ? 'Message supprimé' : m.kind === 'vocal' ? '�
 async function vueConv() {
   const cid = conv.conversation_id, autre = conv.autre_id, me = session.user.id;
   const msgs = new Map(), els = new Map(), coches = new Map();
-  let luAutre = 0, vu = null, reponse = null, dernierJour = '', ecrit = false, minuteurEcrit = null, initial = true;
+  let luAutre = 0, livreAutre = 0, bloque = false, vu = null, reponse = null, dernierJour = '', ecrit = false, minuteurEcrit = null, initial = true;
   setTimeout(() => { initial = false; }, 3000);
 
   const statut = h('div', { className: 'statut' });
   const tete = h('div', { className: 'chat-tete' },
-    h('button', { className: 'retour', onclick: () => { conv = null; afficher(); } }, '‹'),
-    av(conv.autre_avatar, conv.autre_nom, 40),
-    h('div', { style: 'min-width:0' }, h('div', { className: 'coupe', style: 'font-weight:600' }, conv.autre_nom || 'Membre'), statut));
+    h('button', { className: 'retour', onclick: async () => { await lu(); conv = null; afficher(); } }, '‹'),
+    h('div', { className: 'tete-cliquable', onclick: () => { ecranContact = true; afficher(); } }, av(conv.autre_avatar, conv.autre_nom, 40),
+      h('div', { style: 'min-width:0' }, h('div', { className: 'coupe', style: 'font-weight:600' }, conv.autre_nom || 'Membre'), statut)));
   const majEntete = () => {
     const tape = (canalConv?.presenceState?.()[autre] || []).some(x => x.typing);
     statut.textContent = tape ? 'en train d’écrire…' : enLigne.has(autre) ? 'en ligne' : vu ? 'vu ' + jourHeure(vu) : '';
@@ -360,7 +389,7 @@ async function vueConv() {
     if (reponse) barreRep.append(h('div', { style: 'flex:1;min-width:0' }, h('b', {}, reponse.sender_id === me ? 'Vous' : conv.autre_nom || 'Membre'), h('div', { className: 'coupe' }, resume(reponse))),
       h('button', { className: 'btn lien', onclick: () => { reponse = null; majReponse(); } }, '✕'));
   };
-  const majCoches = () => coches.forEach((el, id) => { const lu = Date.parse(msgs.get(id).created_at) <= luAutre; el.textContent = lu ? '✓✓' : '✓'; el.className = 'coche' + (lu ? ' lu' : ''); });
+  const majCoches = () => coches.forEach((el, id) => { const t = Date.parse(msgs.get(id).created_at), lu2 = t <= luAutre, livre = lu2 || t <= livreAutre; el.textContent = livre ? '✓✓' : '✓'; el.className = 'coche' + (lu2 ? ' lu' : ''); });
 
   const contenu = m => {
     if (m.kind === 'texte') return h('div', { className: 'texte' }, m.content);
@@ -421,13 +450,13 @@ async function vueConv() {
     const b = bulle(fusion); ancien.replaceWith(b); els.set(m.id, b); majCoches();
   }
 
-  const lu = () => sb.from('conversation_members').update({ last_read_at: new Date().toISOString() }).eq('conversation_id', cid).eq('user_id', me);
+  const lu = () => sb.rpc('marquer_lu', { cid });
   const tape = etat => { if (ecrit === etat) return; ecrit = etat; canalConv?.track({ typing: etat }); };
   const poster = async champs => {
     const ligne = { conversation_id: cid, ...champs };
     if (reponse) ligne.reply_to = reponse.id;
     const { data: m, error } = await sb.from('messages').insert(ligne).select().single();
-    if (error) { alert(error.message); return false; }
+    if (error) { alert(error.code === '42501' ? 'Message non envoyé.' : error.message); return false; }
     reponse = null; majReponse(); ajouter(m); return true;
   };
   const envoyerTexte = async () => {
@@ -485,12 +514,17 @@ async function vueConv() {
   action.onclick = () => champ.value.trim() ? envoyerTexte() : demarrerVocal();
 
   // Chargement
-  const [{ data: po }, { data: cm }, { data }] = await Promise.all([
+  const [{ data: po }, { data: cmA }, { data: cmM }, { data: bl }] = await Promise.all([
     sb.from('profiles').select('last_seen_at,show_online').eq('id', autre).single(),
-    sb.from('conversation_members').select('last_read_at').eq('conversation_id', cid).eq('user_id', autre).single(),
-    sb.from('messages').select('*').eq('conversation_id', cid).order('created_at', { ascending: false }).limit(80)]);
+    sb.from('conversation_members').select('last_read_at,last_delivered_at').eq('conversation_id', cid).eq('user_id', autre).single(),
+    sb.from('conversation_members').select('cleared_at').eq('conversation_id', cid).eq('user_id', me).single(),
+    sb.from('blocks').select('blocked_id').eq('blocker_id', me).eq('blocked_id', autre).maybeSingle()]);
+  let req = sb.from('messages').select('*').eq('conversation_id', cid);
+  if (cmM?.cleared_at) req = req.gt('created_at', cmM.cleared_at);
+  const { data } = await req.order('created_at', { ascending: false }).limit(80);
+  bloque = !!bl;
   vu = po?.show_online === false ? null : po?.last_seen_at;
-  luAutre = cm ? Date.parse(cm.last_read_at) : 0;
+  luAutre = cmA ? Date.parse(cmA.last_read_at) : 0; livreAutre = cmA ? Date.parse(cmA.last_delivered_at) : 0;
   const liste = (data || []).reverse();
   liste.forEach(m => msgs.set(m.id, m));
   liste.forEach(m => ajouter(m, true));
@@ -499,10 +533,11 @@ async function vueConv() {
   canalConv = sb.channel('conv-' + cid, { config: { presence: { key: me } } })
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${cid}` }, p => { ajouter(p.new); if (p.new.sender_id !== me) lu(); })
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${cid}` }, p => remplacer(p.new))
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversation_members', filter: `conversation_id=eq.${cid}` }, p => { if (p.new.user_id === autre) { luAutre = Date.parse(p.new.last_read_at); majCoches(); } })
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversation_members', filter: `conversation_id=eq.${cid}` }, p => { if (p.new.user_id === autre) { luAutre = Date.parse(p.new.last_read_at); livreAutre = Date.parse(p.new.last_delivered_at); majCoches(); } })
     .on('presence', { event: 'sync' }, majEntete)
     .subscribe(async st => { if (st === 'SUBSCRIBED') await canalConv.track({ typing: false }); });
 
+  if (bloque) barre.replaceChildren(h('button', { className: 'btn', style: 'flex:1', onclick: async () => { await sb.from('blocks').delete().eq('blocker_id', me).eq('blocked_id', autre); afficher(); } }, 'Vous avez bloqué ce contact. Appuyez pour débloquer.'));
   return h('div', { className: 'chat' }, tete, fil, barreRep, barre, fichier);
 }
 
@@ -867,4 +902,146 @@ async function vueAdmin() {
 }
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
-charger();
+// ---------- Son, bannières et accusés de livraison ----------
+let canalGlobal = null, audioCtx = null, invitation = null; const noms = new Map();
+const debloquerAudio = () => { try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume?.(); } catch {} };
+document.addEventListener('click', debloquerAudio); document.addEventListener('touchstart', debloquerAudio, { passive: true });
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); invitation = e; });
+function bip() {
+  if (audioCtx) [[880, 0], [1175, .14]].forEach(([f, t]) => {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain(), d = audioCtx.currentTime + t;
+    o.type = 'sine'; o.frequency.value = f; o.connect(g); g.connect(audioCtx.destination);
+    g.gain.setValueAtTime(.0001, d); g.gain.exponentialRampToValueAtTime(.3, d + .02); g.gain.exponentialRampToValueAtTime(.0001, d + .24); o.start(d); o.stop(d + .26);
+  });
+  navigator.vibrate?.([90, 40, 90]);
+}
+function toast(titre, texte, action) {
+  document.querySelectorAll('.toast').forEach(x => x.remove());
+  const t = h('div', { className: 'toast', onclick: () => { t.remove(); action?.(); } }, h('b', {}, titre), h('div', { className: 'coupe' }, texte));
+  document.body.append(t); setTimeout(() => t.remove(), 5000);
+}
+const nomDe = async id => { if (!noms.has(id)) { const { data } = await sb.from('profiles').select('full_name').eq('id', id).maybeSingle(); noms.set(id, data?.full_name || 'Nouveau message'); } return noms.get(id); };
+async function ouvrirConv(cid) {
+  const { data } = await sb.rpc('mes_conversations'); const c = (data || []).find(x => x.conversation_id === cid);
+  if (c) { conv = c; tab = 'messages'; sous = null; ecranContact = false; afficher(); }
+}
+function ouvrirCible(c) {
+  if (!c || !session) return;
+  if (c.conv) ouvrirConv(c.conv);
+  else if (SECTIONS[c.tab]) { tab = 'plus'; sous = c.tab; conv = null; afficher(); }
+  else { tab = c.tab || 'accueil'; conv = null; sous = null; ecranContact = false; afficher(); }
+}
+function demarrerEcoute() {
+  if (canalGlobal || !session) return;
+  const me = session.user.id;
+  sb.rpc('marquer_livre');
+  canalGlobal = sb.channel('ecoute-' + me)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async p => {
+      const m = p.new; if (m.sender_id === me) return;
+      sb.rpc('marquer_livre', { cid: m.conversation_id });
+      if (conv?.conversation_id === m.conversation_id && tab === 'messages') return;
+      majBadges(); if (tab === 'messages' && !conv) afficher();
+      const { data: cm } = await sb.from('conversation_members').select('muted').eq('conversation_id', m.conversation_id).eq('user_id', me).maybeSingle();
+      if (cm?.muted || document.hidden) return;
+      bip(); toast(await nomDe(m.sender_id), resume(m), () => ouvrirConv(m.conversation_id));
+    })
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${me}` }, p => {
+      if (p.new.kind === 'message') return;
+      majBadges(); if (!document.hidden) { bip(); toast(p.new.title, p.new.body || ''); }
+    })
+    .subscribe();
+}
+
+// ---------- Notifications push (application fermée) ----------
+const VAPID_PUBLIC = 'BPK5qK_h0xjUWtMBHi5ZzlUO6PiDMxo0yPayOvZjNVyr9sBDeqjx4mBRLliXiu4X-0vLlIcN7S3L4P72evPHXKQ';
+const cleB64 = v => Uint8Array.from(atob(v.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - v.length % 4) % 4)), c => c.charCodeAt(0));
+async function activerPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window))
+    throw new Error('Notifications non prises en charge ici. Sur iPhone, installez d’abord l’application sur l’écran d’accueil.');
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') throw new Error('Notifications refusées. Autorisez-les dans les réglages du navigateur.');
+  const reg = await navigator.serviceWorker.ready;
+  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: cleB64(VAPID_PUBLIC) });
+  const j = sub.toJSON();
+  const { error } = await sb.from('push_subscriptions').upsert({ user_id: session.user.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: 'endpoint' });
+  if (error) throw error;
+}
+
+// ---------- Infos du contact (style WhatsApp) ----------
+async function vueContact() {
+  const cid = conv.conversation_id, autre = conv.autre_id, me = session.user.id;
+  const retour2 = () => { ecranContact = false; afficher(); };
+  const [{ data: p }, { data: tel }, { data: cmM }, { data: bl }] = await Promise.all([
+    sb.from('profiles').select('full_name,avatar_url,bio,church_id,show_bio,last_seen_at,show_online').eq('id', autre).single(),
+    sb.rpc('telephone_de', { uid: autre }),
+    sb.from('conversation_members').select('muted,cleared_at').eq('conversation_id', cid).eq('user_id', me).single(),
+    sb.from('blocks').select('blocked_id').eq('blocker_id', me).eq('blocked_id', autre).maybeSingle()]);
+  const { data: eg } = p?.church_id ? await sb.from('churches').select('name,city').eq('id', p.church_id).single() : { data: null };
+  const nom = p?.full_name || conv.autre_nom || 'Membre';
+  const vu = p?.show_online === false ? null : p?.last_seen_at;
+  const apres = q => cmM?.cleared_at ? q.gt('created_at', cmM.cleared_at) : q;
+  const ligne = (icone, texte, onclick, extra) => h('button', { className: 'action-ligne' + (extra ? ' ' + extra : ''), onclick }, h('span', {}, icone), h('span', { style: 'flex:1;text-align:left' }, texte));
+  const zoneRech = h('div'), zoneMed = h('div');
+
+  const champRech = h('input', { type: 'search', placeholder: 'Rechercher un mot dans cette discussion' }), resRech = h('div');
+  let t; champRech.oninput = () => { clearTimeout(t); t = setTimeout(async () => {
+    const q = champRech.value.replace(/[%,()*\\]/g, ' ').trim(); resRech.replaceChildren(); if (q.length < 2) return;
+    const { data } = await apres(sb.from('messages').select('content,created_at,sender_id').eq('conversation_id', cid).eq('kind', 'texte').is('deleted_at', null).ilike('content', `%${q}%`)).order('created_at', { ascending: false }).limit(30);
+    if (!data?.length) return resRech.append(h('p', { className: 'meta' }, 'Aucun résultat.'));
+    data.forEach(m => resRech.append(h('div', { className: 'com' }, h('div', { className: 'meta' }, (m.sender_id === me ? 'Vous' : nom) + ' · ' + quand(m.created_at)), h('div', {}, m.content))));
+  }, 400); };
+  const ouvrirRech = ligne('🔍', 'Rechercher dans la discussion', () => { if (zoneRech.childElementCount) return zoneRech.replaceChildren(); zoneRech.append(h('div', { className: 'card' }, champRech, resRech)); champRech.focus(); });
+
+  const ouvrirMed = ligne('🖼️', 'Médias et documents', async () => {
+    if (zoneMed.childElementCount) return zoneMed.replaceChildren();
+    const { data } = await apres(sb.from('messages').select('id,kind,media_path,media_name,created_at').eq('conversation_id', cid).in('kind', ['image', 'video', 'fichier']).is('deleted_at', null)).order('created_at', { ascending: false }).limit(60);
+    const grille = h('div', { className: 'grille-med' });
+    if (!data?.length) grille.append(h('p', { className: 'meta' }, 'Aucun média partagé.'));
+    (data || []).forEach(m => urlSignee('chat-media', m.media_path).then(u => { if (!u) return;
+      grille.append(m.kind === 'image' ? h('img', { src: u, alt: '', loading: 'lazy', onclick: () => window.open(u, '_blank') })
+        : h('a', { href: u, target: '_blank', rel: 'noopener', className: 'tuile' }, (m.kind === 'video' ? '🎥 ' : '📎 ') + (m.media_name || 'Fichier'))); }));
+    zoneMed.append(h('div', { className: 'card' }, grille));
+  });
+
+  const sourdine = h('input', { type: 'checkbox', checked: !!cmM?.muted });
+  sourdine.onchange = async () => { await sb.from('conversation_members').update({ muted: sourdine.checked }).eq('conversation_id', cid).eq('user_id', me); };
+
+  const exporter = ligne('📤', 'Exporter la discussion', async () => {
+    const { data } = await apres(sb.from('messages').select('*').eq('conversation_id', cid)).order('created_at').limit(3000);
+    const txt = (data || []).map(m => `[${new Date(m.created_at).toLocaleString('fr-FR')}] ${m.sender_id === me ? (profile.full_name || 'Moi') : nom} : ${m.deleted_at ? '(message supprimé)' : resume(m)}`).join('\n');
+    const a = h('a', { href: URL.createObjectURL(new Blob([txt], { type: 'text/plain' })), download: `Discussion avec ${nom}.txt` }); document.body.append(a); a.click(); a.remove();
+  });
+  const vider = ligne('🧹', 'Vider la discussion (pour moi)', async () => {
+    if (!confirm('Vider cette discussion ? Les messages disparaîtront seulement de votre côté.')) return;
+    await sb.rpc('vider_discussion', { cid }); retour2();
+  });
+  const bloquer = ligne('🚫', bl ? `Débloquer ${nom}` : `Bloquer ${nom}`, async () => {
+    if (!bl && !confirm(`Bloquer ${nom} ? Cette personne ne pourra plus vous écrire.`)) return;
+    if (bl) await sb.from('blocks').delete().eq('blocker_id', me).eq('blocked_id', autre);
+    else await sb.from('blocks').insert({ blocked_id: autre });
+    afficher();
+  }, 'danger');
+  const signal = ligne('🚩', `Signaler ${nom}`, () => signaler('user', autre), 'danger');
+
+  const infos = [p?.show_bio !== false && p?.bio ? h('p', {}, p.bio) : null,
+    eg ? h('p', { className: 'meta' }, '⛪ ' + eg.name + (eg.city ? ' · ' + eg.city : '')) : null,
+    tel ? h('p', {}, '📞 ' + tel) : null].filter(Boolean);
+
+  return h('div', { className: 'contact' },
+    h('div', { className: 'chat-tete' }, h('button', { className: 'retour', onclick: retour2 }, '‹'), h('div', { style: 'font-weight:600' }, 'Infos du contact')),
+    h('div', { className: 'contact-corps' },
+      h('div', { className: 'contact-haut' }, av(p?.avatar_url, nom, 120), h('h2', {}, nom),
+        h('div', { className: 'meta' }, enLigne.has(autre) ? 'en ligne' : vu ? 'vu ' + jourHeure(vu) : '')),
+      infos.length ? h('div', { className: 'card' }, ...infos) : null,
+      h('div', { className: 'card actions-liste' }, ouvrirRech, zoneRech, ouvrirMed, zoneMed,
+        h('label', { className: 'action-ligne' }, h('span', {}, '🔕'), h('span', { style: 'flex:1' }, 'Mettre en sourdine'), sourdine),
+        exporter, vider),
+      h('div', { className: 'card actions-liste' }, bloquer, signal)));
+}
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data?.type === 'ouvrir') ouvrirCible(e.data); });
+
+charger().then(() => {
+  const q = new URLSearchParams(location.search).get('ouvrir');
+  if (q) { try { ouvrirCible(JSON.parse(q)); } catch {} history.replaceState(null, '', location.pathname); }
+});
