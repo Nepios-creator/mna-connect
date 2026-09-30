@@ -83,3 +83,23 @@ a.btn{display:inline-block;text-decoration:none;margin-top:.5rem}
 .pt{position:absolute;right:0;bottom:2px;width:13px;height:13px;border-radius:50%;background:#25d366;border:2px solid var(--fond);display:none}
 .wa-mid{flex:1;min-width:0}.wa-droite{text-align:right;display:flex;flex-direction:column;gap:.25rem;align-items:flex-end}
 .meta.fort{color:var(--texte);font-weight:600}
+
+/* ---- Mot de passe, bannières, infos du contact ---- */
+.mdp{position:relative}.mdp input{padding-right:3.2rem}
+.oeil{position:absolute;right:.2rem;top:.3rem;width:44px;height:46px;border:0;background:none;font-size:1.2rem;cursor:pointer}
+.toast{position:fixed;top:calc(.6rem + env(safe-area-inset-top));left:.6rem;right:.6rem;z-index:60;background:var(--nuit);color:#fff;padding:.7rem 1rem;border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.3);cursor:pointer;max-width:560px;margin:0 auto}
+.toast .coupe{opacity:.9}
+.discret{min-height:0!important;padding:0 .6rem!important;font-size:1.3rem;text-decoration:none!important;color:var(--doux)!important}
+.tete-cliquable{display:flex;align-items:center;gap:.6rem;flex:1;min-width:0;cursor:pointer}
+.contact{min-height:100dvh;background:var(--fond)}
+.contact .chat-tete{gap:.4rem}
+.contact-corps{padding:1rem;max-width:640px;margin:0 auto}
+.contact-haut{display:flex;flex-direction:column;align-items:center;gap:.4rem;padding:.5rem 0 1rem;text-align:center}
+.action-ligne{display:flex;align-items:center;gap:.8rem;width:100%;background:none;border:0;border-bottom:1px solid var(--ligne);padding:.9rem .2rem;font-size:1rem;min-height:52px;cursor:pointer;color:var(--texte)}
+.action-ligne.danger{color:var(--rouge)}
+.actions-liste{padding:.3rem 1rem}
+.actions-liste>.action-ligne:last-child{border-bottom:0}
+.grille-med{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+.grille-med img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;cursor:pointer}
+.grille-med .tuile{display:flex;align-items:center;padding:.4rem;background:var(--fond);border-radius:4px;font-size:.8rem;overflow:hidden;color:var(--texte)}
+.grille-med p{grid-column:1/-1}
