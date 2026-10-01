@@ -1,6 +1,6 @@
-const V = 'mna-v11', SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'logo.png', 'logo-entete.png'];
+const V = 'mna-v13', SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'logo-192.png', 'logo-512.png', 'logo.png', 'logo-entete.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(V).then(c => c.addAll(SHELL))); self.skipWaiting(); });
-self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(k => Promise.all(k.filter(x => x !== V).map(x => caches.delete(x))))); self.clients.claim(); });
+self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(k => Promise.all(k.filter(x => x !== V && x !== 'mna-meta').map(x => caches.delete(x))))); self.clients.claim(); });
 self.addEventListener('fetch', e => {
   const r = e.request;
   if (r.method !== 'GET' || new URL(r.url).origin !== location.origin) return;
@@ -12,8 +12,11 @@ self.addEventListener('push', e => {
   e.waitUntil((async () => {
     const cs = await clients.matchAll({ type: 'window', includeUncontrolled: true });
     if (cs.some(c => c.visibilityState === 'visible')) return;
+    // Ne montre la notification que si elle est destinée au compte actuellement connecté sur cet appareil
+    const rep = await (await caches.open('mna-meta')).match('uid'); const uid = rep ? await rep.text() : null;
+    if (d.uid && uid !== null && d.uid !== uid) return;
     await self.registration.showNotification(d.title || 'MNA Connect', {
-      body: d.body || '', icon: 'icon-192.png', badge: 'icon-192.png', tag: d.tag || 'mna', renotify: true, vibrate: [120, 60, 120], data: d });
+      body: d.body || '', icon: 'logo-192.png', badge: 'logo-192.png', tag: d.tag || 'mna', renotify: true, vibrate: [120, 60, 120], data: d });
   })());
 });
 self.addEventListener('notificationclick', e => {

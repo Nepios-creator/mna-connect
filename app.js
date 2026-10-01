@@ -4,6 +4,10 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const SB_URL = 'https://rvsjhsugqxtgrfnqnbxu.supabase.co', SB_KEY = 'sb_publishable_zIBVaJbFsAg_1otYTEXpiA_SCBidk6P';
 const sb = createClient(SB_URL, SB_KEY);
 
+['append', 'prepend', 'replaceChildren', 'after', 'before'].forEach(m => {
+  const orig = Element.prototype[m];
+  Element.prototype[m] = function (...a) { return orig.apply(this, a.flat().filter(x => x != null && x !== false)); };
+});
 const h = (tag, props = {}, ...kids) => {
   const e = document.createElement(tag);
   Object.assign(e, props);
@@ -61,7 +65,8 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) { canalPresence.untrack(); sb.from('profiles').update({ last_seen_at: new Date().toISOString() }).eq('id', session.user.id); }
   else canalPresence.track({ t: Date.now() });
 });
-let perms = new Set();
+let syncConv = null;
+let perms = new Set(), serieOuverte = null, sessionOuverte = null;
 let session = null, profile = null, tab = 'accueil', groupe = null, conv = null, sous = null, ecranContact = false;
 
 async function charger() {
@@ -74,20 +79,21 @@ async function charger() {
     if (profile) profile.phone = (await sb.rpc('mon_telephone')).data;
     perms = new Set(((await sb.from('admin_permissions').select('permission').eq('user_id', session.user.id)).data || []).map(x => x.permission));
   }
-  if (session) { demarrerPresence(); demarrerEcoute(); } else arreterPresence();
+  if (session) { demarrerPresence(); demarrerEcoute(); memoriserUid(session.user.id); majPushAuto(); } else { arreterPresence(); memoriserUid(''); }
   afficher();
 }
 sb.auth.onAuthStateChange((_e, s) => { if ((s?.user?.id) !== (session?.user?.id)) charger(); });
 
 function afficher() {
   if (canalConv) { sb.removeChannel(canalConv); canalConv = null; }
+  clearInterval(syncConv);
   surPresence = null;
   root.replaceChildren();
   if (!session) return root.append(vueAuth());
   if (profile?.status === 'suspendu') {
     return root.append(h('div', { className: 'auth' }, h('h2', {}, 'Compte suspendu'),
       h('p', {}, 'Contactez l’administration du ministère.'),
-      h('button', { className: 'btn', onclick: () => sb.auth.signOut() }, 'Se déconnecter')));
+      h('button', { className: 'btn', onclick: deconnexion }, 'Se déconnecter')));
   }
   if (tab === 'messages' && conv) { const plein = h('div', { className: 'plein' }); root.append(plein); (ecranContact ? vueContact() : vueConv()).then(v => plein.append(v)); return; }
   const main = h('main');
@@ -150,6 +156,7 @@ function vueAuth() {
 }
 async function vueFil(groupId) {
   const box = h('div');
+  if (!groupId) box.append(await accueilHaut());
   const texte = h('textarea', { rows: 3, placeholder: 'Partagez quelque chose avec la communauté…' });
   const err = h('p', { className: 'erreur' });
   const pub = h('button', { className: 'btn primaire' }, 'Publier');
@@ -308,10 +315,12 @@ async function vueProfil() {
   const etat = h('p', { className: 'meta' });
   const majEtat = () => { etat.textContent = !('Notification' in window) ? 'Notifications non prises en charge sur cet appareil.' : Notification.permission === 'granted' ? '✅ Notifications activées sur cet appareil.' : Notification.permission === 'denied' ? '⛔ Notifications bloquées : autorisez-les dans les réglages du navigateur.' : ''; };
   majEtat();
+  prefsNotif().then(el => zoneApp.append(el));
   const dejaInstallee = matchMedia('(display-mode: standalone)').matches;
   zoneApp.append(etat,
     h('div', { className: 'actions', style: 'flex-wrap:wrap' },
       h('button', { className: 'btn', onclick: async () => { try { await activerPush(); } catch (e) { alert(e.message); } majEtat(); } }, '🔔 Activer les notifications'),
+      h('button', { className: 'btn', onclick: () => { debloquerAudio(); bip(); } }, '🔊 Tester le son'),
       dejaInstallee ? h('span', { className: 'meta' }, '✅ Application installée')
         : invitation ? h('button', { className: 'btn primaire', onclick: () => invitation.prompt() }, '📲 Installer l’application') : null),
     !dejaInstallee && !invitation ? h('p', { className: 'meta' }, 'Pour installer : menu ⋮ du navigateur, puis « Installer l’application » ou « Ajouter à l’écran d’accueil ».') : null);
@@ -353,7 +362,7 @@ async function vueProfil() {
     h('label', { className: 'check', style: 'margin-top:.6rem' }, po, 'Afficher quand je suis en ligne et ma dernière connexion'),
     h('label', { className: 'check', style: 'margin-top:.6rem' }, sp, 'Montrer mon numéro aux membres avec qui je discute'),
     zoneApp,
-    h('p'), msg, enr, ' ', h('button', { className: 'btn', onclick: () => sb.auth.signOut() }, 'Se déconnecter'));
+    h('p'), msg, enr, ' ', h('button', { className: 'btn', onclick: deconnexion }, 'Se déconnecter'));
 }
 
 async function vueMessages() {
@@ -481,6 +490,16 @@ async function vueConv() {
   }
 
   const lu = () => sb.rpc('marquer_lu', { cid });
+  async function rattraper() {
+    if (conv?.conversation_id !== cid) return;
+    const dernier = [...msgs.values()].reduce((m, x) => x.created_at > m ? x.created_at : m, cmM?.cleared_at || '1970-01-01T00:00:00Z');
+    const [{ data: nv }, { data: cm2 }] = await Promise.all([
+      sb.from('messages').select('*').eq('conversation_id', cid).gt('created_at', dernier).order('created_at').limit(100),
+      sb.from('conversation_members').select('last_read_at,last_delivered_at').eq('conversation_id', cid).eq('user_id', autre).single()]);
+    (nv || []).forEach(m => ajouter(m));
+    if ((nv || []).some(m => m.sender_id !== me)) lu();
+    if (cm2) { luAutre = Date.parse(cm2.last_read_at); livreAutre = Date.parse(cm2.last_delivered_at); majCoches(); }
+  }
   const tape = etat => { if (ecrit === etat) return; ecrit = etat; canalConv?.track({ typing: etat }); };
   const poster = async champs => {
     const ligne = { conversation_id: cid, ...champs };
@@ -564,7 +583,8 @@ async function vueConv() {
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${cid}` }, p => remplacer(p.new))
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversation_members', filter: `conversation_id=eq.${cid}` }, p => { if (p.new.user_id === autre) { luAutre = Date.parse(p.new.last_read_at); livreAutre = Date.parse(p.new.last_delivered_at); majCoches(); } })
     .on('presence', { event: 'sync' }, majEntete)
-    .subscribe(async st => { if (st === 'SUBSCRIBED') await canalConv.track({ typing: false }); });
+    .subscribe(async st => { if (st === 'SUBSCRIBED') { await canalConv.track({ typing: false }); rattraper(); } });
+  clearInterval(syncConv); syncConv = setInterval(() => { if (!document.hidden) rattraper(); }, 12000);
 
   if (bloque) barre.replaceChildren(h('button', { className: 'btn', style: 'flex:1', onclick: async () => { await sb.from('blocks').delete().eq('blocker_id', me).eq('blocked_id', autre); afficher(); } }, 'Vous avez bloqué ce contact. Appuyez pour débloquer.'));
   return h('div', { className: 'chat' }, tete, fil, barreRep, barre, fichier);
@@ -573,8 +593,8 @@ async function vueConv() {
 // ---------- Section « Plus » ----------
 const admin = () => profile?.role === 'admin';
 const can = p => profile?.role === 'admin' || perms.has(p);
-const PERM_TABLE = { announcements: 'annonces', videos: 'videos', teachings: 'enseignements', events: 'agenda', churches: 'assemblees', meditations: 'meditations' };
-const PERMS = [['publier', 'Publier à l’accueil et épingler'], ['annonces', 'Annonces'], ['videos', 'Vidéothèque et directs'], ['enseignements', 'Enseignements'], ['agenda', 'Agenda'], ['meditations', 'Méditation du jour'], ['assemblees', 'Assemblées'], ['groupes', 'Communautés (créer, supprimer)'], ['bibliotheque', 'Lien de la bibliothèque'], ['moderer', 'Modération : signalements, suppressions, suspensions']];
+const PERM_TABLE = { announcements: 'annonces', videos: 'videos', teachings: 'enseignements', events: 'agenda', churches: 'assemblees', meditations: 'meditations', series: 'parcours', sessions: 'parcours' };
+const PERMS = [['publier', 'Publier à l’accueil et épingler'], ['annonces', 'Annonces'], ['videos', 'Vidéothèque et directs'], ['enseignements', 'Enseignements'], ['agenda', 'Agenda'], ['meditations', 'Méditation du jour'], ['assemblees', 'Assemblées'], ['groupes', 'Communautés (créer, supprimer)'], ['bibliotheque', 'Lien de la bibliothèque'], ['moderer', 'Modération : signalements, suppressions, suspensions'], ['parcours', 'Parcours « 5 minutes avec Christ »']];
 const lab = (liste, v) => (liste.find(x => x[0] === v) || [v, v])[1];
 const CAT_ANN = [['generale', 'Générale'], ['reunion', 'Réunion'], ['culte', 'Culte'], ['conference', 'Conférence'], ['formation', 'Formation'], ['evenement', 'Événement'], ['important', 'Important']];
 const CAT_VID = [['culte', 'Cultes'], ['predication', 'Prédications'], ['enseignement', 'Enseignements'], ['conference', 'Conférences'], ['formation', 'Formations'], ['temoignage', 'Témoignages']];
@@ -587,7 +607,7 @@ const retour = titre => h('div', { className: 'qui', style: 'margin-bottom:.8rem
 const supprimer = (table, id) => can(PERM_TABLE[table]) ? h('button', { className: 'btn lien', onclick: async () => {
   if (confirm('Supprimer définitivement ?')) { await sb.from(table).delete().eq('id', id); afficher(); } } }, 'Supprimer') : null;
 
-function formulaire(titre, table, champs) {
+function formulaire(titre, table, champs, extra = {}) {
   const els = champs.map(c => [c, c.type === 'textarea' ? h('textarea', { rows: 3, placeholder: c.label })
     : c.type === 'select' ? h('select', {}, ...c.options.map(([v, l]) => h('option', { value: v }, l)))
     : c.type === 'checkbox' ? h('input', { type: 'checkbox' })
@@ -595,7 +615,7 @@ function formulaire(titre, table, champs) {
   const msg = h('p', { className: 'erreur' });
   const bt = h('button', { className: 'btn primaire' }, 'Publier');
   bt.onclick = async () => {
-    msg.textContent = ''; const row = {};
+    msg.textContent = ''; const row = { ...extra };
     for (const [c, el] of els) {
       let v = c.type === 'checkbox' ? el.checked : el.value.trim();
       if (c.type === 'datetime-local' && v) v = new Date(v).toISOString();
@@ -633,6 +653,8 @@ function vignette(id) {
 
 const SECTIONS = {
   recherche: ['🔍 Recherche', () => vueRecherche()],
+  parcours: ['🔥 Mes parcours · 5 minutes avec Christ', () => vueParcours()],
+  monassemblee: ['🏛️ Mon assemblée', () => vueMonAssemblee()],
   meditations: ['🌅 Méditation du jour', () => vueMeditations()],
   annonces: ['📢 Annonces', () => vueAnnonces()],
   videos: ['🎥 Vidéothèque et direct', () => vueVideos()],
@@ -721,9 +743,10 @@ async function vueAgenda() {
 }
 
 async function vuePriere() {
-  const box = h('div', {}, retour('Espace de prière'));
-  const texte = h('textarea', { rows: 3, placeholder: 'Partagez un sujet de prière…' });
-  const vis = h('select', {}, h('option', { value: 'public' }, 'Publique (tous les membres)'), h('option', { value: 'groupe' }, 'Réservée à un groupe'), h('option', { value: 'prive' }, 'Privée (moi seul)'));
+  const box = h('div', {}, retour('Mur de prière'));
+  const texte = h('textarea', { rows: 3, placeholder: 'Partagez une demande de prière ou un témoignage…' });
+  const genre = h('select', {}, h('option', { value: 'demande' }, '🙏 Demande de prière'), h('option', { value: 'temoignage' }, '🎉 Témoignage / reconnaissance'));
+  const vis = h('select', {}, h('option', { value: 'public' }, '🌍 Publique (tous les membres)'), h('option', { value: 'groupe' }, '👥 Réservée à un groupe'), h('option', { value: 'prive' }, '🔒 Privée (moi seul)'));
   const { data: mg } = await sb.from('group_members').select('group_id,groups!group_members_group_id_fkey(name)').eq('user_id', session.user.id).eq('status', 'actif');
   const grp = h('select', { style: 'display:none' }, ...(mg || []).map(m => h('option', { value: m.group_id }, m.groups?.name || 'Groupe')));
   vis.onchange = () => { grp.style.display = vis.value === 'groupe' ? '' : 'none'; };
@@ -731,28 +754,47 @@ async function vuePriere() {
   bt.onclick = async () => {
     err.textContent = ''; if (!texte.value.trim()) return;
     if (vis.value === 'groupe' && !grp.value) { err.textContent = 'Rejoignez d’abord un groupe.'; return; }
-    const { error } = await sb.from('prayer_requests').insert({ content: texte.value.trim(), visibility: vis.value, group_id: vis.value === 'groupe' ? grp.value : null });
+    const { error } = await sb.from('prayer_requests').insert({ content: texte.value.trim(), kind: genre.value, visibility: vis.value, group_id: vis.value === 'groupe' ? grp.value : null });
     if (error) err.textContent = error.message; else afficher();
   };
-  box.append(h('div', { className: 'card' }, texte, vis, grp, err, bt));
+  box.append(h('div', { className: 'card' }, texte, genre, vis, grp, err, bt));
   const [{ data, error }, { data: mes }] = await Promise.all([
-    sb.from('prayer_requests').select('id,content,visibility,created_at,author_id,profiles!prayer_requests_author_id_fkey(full_name,avatar_url),prayer_supports(count)').order('created_at', { ascending: false }).limit(60),
+    sb.from('prayer_requests').select('id,content,kind,visibility,created_at,author_id,profiles!prayer_requests_author_id_fkey(full_name,avatar_url),prayer_supports(count),prayer_comments(count)').order('created_at', { ascending: false }).limit(40),
     sb.from('prayer_supports').select('request_id').eq('user_id', session.user.id)]);
   if (error) return box.append(h('p', { className: 'erreur' }, error.message)), box;
   const prie = new Set((mes || []).map(x => x.request_id));
-  if (!data.length) box.append(h('p', { className: 'vide' }, 'Aucun sujet de prière pour le moment.'));
+  if (!data.length) box.append(h('p', { className: 'vide' }, 'Aucun message pour le moment. Soyez le premier à partager.'));
   data.forEach(r => {
-    let n = r.prayer_supports[0]?.count || 0, moi = prie.has(r.id);
-    const b = h('button', {}), maj = () => { b.className = moi ? 'on' : ''; b.textContent = `🙏 ${moi ? 'Je prie' : 'Je prie pour toi'} (${n})`; }; maj();
+    const tem = r.kind === 'temoignage';
+    let n = r.prayer_supports[0]?.count || 0, nc = r.prayer_comments[0]?.count || 0, moi = prie.has(r.id);
+    const ligne = h('div', { className: 'meta' }), b = h('button', {}), bc = h('button', {}), zone = h('div');
+    const maj = () => {
+      b.className = moi ? 'on' : ''; b.textContent = tem ? (moi ? '🙌 Gloire à Dieu !' : '🙌 Gloire à Dieu') : (moi ? '🙏 Je prie pour toi ✓' : '🙏 Je prie pour toi'); bc.textContent = `💬 ${nc}`;
+      ligne.textContent = n ? (tem ? `🎉 ${n} personne${n > 1 ? 's' : ''} se réjouissent avec vous.` : `🙏 ${n} personne${n > 1 ? 's' : ''} prie${n > 1 ? 'nt' : ''} pour cette demande.`) : '';
+    }; maj();
     b.onclick = async () => {
       const x = moi ? await sb.from('prayer_supports').delete().eq('request_id', r.id).eq('user_id', session.user.id) : await sb.from('prayer_supports').insert({ request_id: r.id });
       if (!x.error) { moi = !moi; n += moi ? 1 : -1; maj(); }
     };
+    bc.onclick = async () => {
+      if (zone.childElementCount) return zone.replaceChildren();
+      const { data: cs } = await sb.from('prayer_comments').select('id,content,created_at,author_id,profiles!prayer_comments_author_id_fkey(full_name)').eq('request_id', r.id).order('created_at');
+      const c = h('div', { className: 'com' });
+      (cs || []).forEach(x => c.append(h('p', {}, h('span', { className: 'auteur' }, (x.profiles?.full_name || 'Membre') + ' '), x.content)));
+      const champ = h('input', { placeholder: 'Un mot d’encouragement…' }), ok = h('button', { className: 'btn' }, 'Envoyer');
+      ok.onclick = async () => {
+        if (!champ.value.trim()) return;
+        const { error: e } = await sb.from('prayer_comments').insert({ request_id: r.id, content: champ.value.trim() });
+        if (e) return alert(e.message); nc++; maj(); zone.replaceChildren(); bc.onclick();
+      };
+      c.append(champ, ok); zone.append(c);
+    };
     const sup = (r.author_id === session.user.id || can('moderer')) ? h('button', { className: 'btn lien', onclick: async () => {
-      if (confirm('Supprimer cette demande ?')) { await sb.from('prayer_requests').delete().eq('id', r.id); afficher(); } } }, 'Supprimer') : null;
+      if (confirm('Supprimer ce message ?')) { await sb.from('prayer_requests').delete().eq('id', r.id); afficher(); } } }, 'Supprimer') : null;
     box.append(h('article', { className: 'card' }, h('div', { className: 'ligne' }, h('div', { className: 'qui' }, av(r.profiles?.avatar_url, r.profiles?.full_name, 36),
-      h('div', {}, h('div', { className: 'auteur' }, r.profiles?.full_name || 'Membre'), h('div', { className: 'meta' }, quand(r.created_at) + (r.visibility === 'public' ? '' : r.visibility === 'prive' ? ' · Privée' : ' · Groupe')))), sup),
-      h('p', { style: 'white-space:pre-wrap' }, r.content), h('div', { className: 'actions' }, b)));
+      h('div', {}, h('div', { className: 'auteur' }, r.profiles?.full_name || 'Membre'),
+        h('div', { className: 'meta' }, (tem ? '🎉 Témoignage · ' : '🙏 Demande · ') + quand(r.created_at) + (r.visibility === 'prive' ? ' · 🔒 Privé' : r.visibility === 'groupe' ? ' · 👥 Groupe' : '')))), sup),
+      h('p', { style: 'white-space:pre-wrap' }, r.content), ligne, h('div', { className: 'actions' }, b, bc), zone));
   });
   return box;
 }
@@ -980,6 +1022,202 @@ function rogner(file) {
   });
 }
 
+// ---------- Notifications : préférences ----------
+const KINDS_NOTIF = [['annonce', 'Annonces'], ['evenement', 'Événements'], ['enseignement', 'Enseignements'], ['meditation', 'Méditation du jour'], ['video', 'Vidéos et directs'], ['commentaire', 'Commentaires sur mes publications'], ['reaction', 'Réactions à mes publications'], ['mention', 'Quand on m’identifie'], ['priere', 'Mur de prière (prières et commentaires)']];
+async function prefsNotif() {
+  const { data } = await sb.from('notif_prefs').select('muted').eq('user_id', session.user.id).maybeSingle();
+  const muted = new Set(data?.muted || []);
+  const bloc = h('div', { className: 'com' }, h('h3', {}, 'Mes notifications'), h('p', { className: 'meta' }, 'Cochez ce que vous voulez recevoir.'));
+  KINDS_NOTIF.forEach(([k, l]) => {
+    const c = h('input', { type: 'checkbox', checked: !muted.has(k) });
+    c.onchange = async () => { c.checked ? muted.delete(k) : muted.add(k); await sb.from('notif_prefs').upsert({ user_id: session.user.id, muted: [...muted] }); };
+    bloc.append(h('label', { className: 'check', style: 'margin:.35rem 0' }, c, l));
+  });
+  return bloc;
+}
+
+// ---------- Accueil : Ma journée, direct, mur de prière, communauté, événements ----------
+const ouvrir = (sec, extra = {}) => { tab = 'plus'; sous = sec; conv = null; Object.assign(window.__nav = window.__nav || {}, extra); afficher(); };
+const jourLocal = d => new Date(d).toLocaleDateString('en-CA');
+function serieEnCours(dates) {
+  const s = new Set(dates.map(jourLocal)); let n = 0; const d = new Date();
+  if (!s.has(jourLocal(d))) d.setDate(d.getDate() - 1);
+  while (s.has(jourLocal(d))) { n++; d.setDate(d.getDate() - 1); }
+  return n;
+}
+function prochaineSession(sessions, faites, parSerie) {
+  // première session non terminée de chaque parcours commencé ; disponible si la précédente a été terminée un jour antérieur
+  const auj = jourLocal(new Date()), res = [];
+  parSerie.forEach(([sid, titre, jours]) => {
+    const liste = sessions.filter(x => x.series_id === sid).sort((a, b) => a.day_number - b.day_number);
+    const suiv = liste.find(x => !faites.has(x.id)); if (!suiv) return;
+    const prec = liste[liste.indexOf(suiv) - 1];
+    const dispo = !prec || jourLocal(faites.get(prec.id)) < auj || admin();
+    res.push({ sid, titre, jours, suiv, fait: liste.indexOf(suiv), dispo });
+  });
+  return res;
+}
+async function accueilHaut() {
+  const haut = h('div'), me = session.user.id, jour = jourLocal(new Date());
+  const prenom = (profile.full_name || '').trim().split(' ')[0] || 'cher membre';
+  haut.append(h('h2', { style: 'margin:.2rem 0 .8rem' }, `Bonjour, ${prenom} 👋`));
+  sb.from('user_activity').upsert({ user_id: me, day: jour }, { onConflict: 'user_id,day', ignoreDuplicates: true });
+  const [med, ms, mfaits, live, evts, cpt, mur] = await Promise.all([
+    sb.from('meditations').select('id,title,verse,body,for_date').lte('for_date', jour).order('for_date', { ascending: false }).limit(1),
+    sb.from('member_series').select('series_id,series(title,days,active)'),
+    sb.from('member_sessions').select('session_id,completed_at').order('completed_at', { ascending: false }).limit(400),
+    sb.from('videos').select('id,title,youtube_id').eq('is_live', true).limit(1),
+    sb.from('events').select('id,title,starts_at,location').is('church_id', null).gte('starts_at', new Date().toISOString()).order('starts_at').limit(3),
+    sb.rpc('compteurs_communaute'),
+    sb.from('prayer_requests').select('id,content,kind,profiles!prayer_requests_author_id_fkey(full_name)').eq('visibility', 'public').order('created_at', { ascending: false }).limit(2)]);
+  const faites = new Map((mfaits.data || []).map(x => [x.session_id, x.completed_at]));
+  const parSerie = (ms.data || []).filter(x => x.series?.active).map(x => [x.series_id, x.series.title, x.series.days]);
+  const ids = parSerie.map(x => x[0]);
+  const { data: sessions } = ids.length ? await sb.from('sessions').select('id,series_id,day_number,title').in('series_id', ids) : { data: [] };
+  const aVenir = prochaineSession(sessions || [], faites, parSerie);
+  const serie = serieEnCours([...faites.values()]), faitAuj = [...faites.values()].some(d => jourLocal(d) === jour);
+
+  // MA JOURNÉE
+  const m = med.data?.[0], carte = h('div', { className: 'card journee' }, h('h3', {}, '🌅 Ma journée'));
+  carte.append(m ? h('div', { className: 'bloc' }, h('div', { className: 'meta' }, '📖 Pensée du jour'), h('div', { className: 'auteur' }, m.title), m.verse ? h('div', { className: 'meta', style: 'font-style:italic' }, m.verse) : null,
+      h('p', {}, m.body.length > 140 ? m.body.slice(0, 140) + '…' : m.body), h('button', { className: 'btn', onclick: () => ouvrir('meditations') }, 'Lire'))
+    : h('div', { className: 'bloc meta' }, '📖 La pensée du jour sera publiée par la direction.'));
+  const s1 = aVenir[0];
+  carte.append(h('div', { className: 'bloc' }, h('div', { className: 'meta' }, '🧠 5 minutes avec Christ'),
+    s1 ? h('div', {}, h('div', { className: 'auteur' }, `${s1.titre} · jour ${s1.suiv.day_number}/${s1.jours}`), h('div', { className: 'meta' }, s1.suiv.title),
+        s1.dispo ? h('button', { className: 'btn primaire', onclick: () => { sessionOuverte = s1.suiv.id; serieOuverte = null; ouvrir('parcours'); } }, 'Commencer la session')
+          : h('p', { className: 'meta' }, '✅ Session du jour terminée. La suivante sera disponible demain.'))
+      : ids.length ? h('p', {}, '🎉 Vous avez terminé vos parcours. Bravo !') : h('p', {}, 'Choisissez un parcours de quelques jours pour prendre un rendez-vous quotidien avec Christ.'),
+    !s1 ? h('button', { className: 'btn', onclick: () => { serieOuverte = null; sessionOuverte = null; ouvrir('parcours'); } }, ids.length ? 'Voir les parcours' : 'Choisir un parcours') : null));
+  carte.append(h('div', { className: 'bloc' }, h('div', { className: 'auteur' }, `Votre série actuelle : ${serie} jour${serie > 1 ? 's' : ''} ${serie ? '🔥' : ''}`), serie && !faitAuj ? h('div', { className: 'meta' }, 'Terminez une session aujourd’hui pour la prolonger.') : null));
+  haut.append(carte);
+
+  // DIRECT
+  const lv = live.data?.[0];
+  if (lv) haut.append(h('div', { className: 'card epingle' }, h('div', { className: 'ligne' }, h('span', { className: 'direct' }, '🔴 EN DIRECT'), h('button', { className: 'btn primaire', onclick: () => ouvrir('videos') }, 'Rejoindre')), h('div', { className: 'auteur', style: 'margin-top:.4rem' }, lv.title)));
+
+  // MUR DE PRIÈRE
+  const mu = mur.data || [];
+  if (mu.length) haut.append(h('div', { className: 'card' }, h('div', { className: 'ligne' }, h('h3', {}, '🙏 Mur de prière'), h('button', { className: 'btn lien', onclick: () => ouvrir('priere') }, 'Voir tout')),
+    ...mu.map(r => h('div', { className: 'com' }, h('div', { className: 'meta' }, (r.kind === 'temoignage' ? '🎉 ' : '🙏 ') + (r.profiles?.full_name || 'Membre')), h('div', {}, r.content.length > 110 ? r.content.slice(0, 110) + '…' : r.content)))));
+
+  // COMMUNAUTÉ
+  const c = Object.fromEntries((cpt.data || []).map(x => [x.cle, Number(x.n)]));
+  if (c.membres) haut.append(h('div', { className: 'card' }, h('h3', {}, '🌍 Ce qui se passe dans la communauté'), h('div', { className: 'kpis' },
+    ...[[Math.max(enLigne.size, 1), 'en ligne maintenant'], [c.actifs_aujourdhui, 'actifs aujourd’hui'], [c.prieres, 'prières faites'], [c.demandes, 'demandes de prière (30 j)'], [c.temoignages, 'témoignages (30 j)'], [c.sessions_aujourdhui, 'sessions terminées aujourd’hui'], [c.membres, 'membres'], [c.assemblees, 'assemblées']]
+      .map(([n, l]) => h('div', { className: 'kpi' }, h('b', {}, String(n ?? 0)), h('span', {}, l))))));
+
+  // PROCHAINS ÉVÉNEMENTS
+  if (evts.data?.length) haut.append(h('div', { className: 'card' }, h('div', { className: 'ligne' }, h('h3', {}, '📅 Prochains événements'), h('button', { className: 'btn lien', onclick: () => ouvrir('agenda') }, 'Agenda')),
+    ...evts.data.map(e => h('div', { className: 'com' }, h('div', { className: 'auteur' }, e.title), h('div', { className: 'meta' }, new Date(e.starts_at).toLocaleString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) + (e.location ? ' · ' + e.location : ''))))));
+  haut.append(h('h3', { style: 'margin:.6rem 0' }, '📰 Fil d’actualités'));
+  return haut;
+}
+
+// ---------- Parcours « 5 minutes avec Christ » ----------
+async function vueParcours() {
+  if (sessionOuverte) return vueSession();
+  if (serieOuverte) return vueSerie();
+  const box = h('div', {}, retour('Mes parcours'));
+  if (can('parcours')) box.append(formulaire('Nouveau parcours (7, 14, 30, 40 jours…)', 'series', [
+    { k: 'title', label: 'Titre du parcours', requis: 1 }, { k: 'description', label: 'Description', type: 'textarea' }, { k: 'days', label: 'Nombre de jours', type: 'number', requis: 1 }]));
+  const [{ data: ser }, { data: ms }, { data: sess }, { data: fa }] = await Promise.all([
+    sb.from('series').select('*').order('created_at', { ascending: false }), sb.from('member_series').select('series_id'),
+    sb.from('sessions').select('id,series_id'), sb.from('member_sessions').select('session_id,completed_at')]);
+  const faites = new Map((fa || []).map(x => [x.session_id, x.completed_at])), commence = new Set((ms || []).map(x => x.series_id));
+  const serie = serieEnCours([...faites.values()]);
+  box.append(h('div', { className: 'card' }, h('div', { className: 'auteur' }, `Votre série actuelle : ${serie} jour${serie > 1 ? 's' : ''} ${serie ? '🔥' : ''}`),
+    h('div', { className: 'meta' }, `${faites.size} session${faites.size > 1 ? 's' : ''} terminée${faites.size > 1 ? 's' : ''} · une session par jour`)));
+  if (!ser?.length) box.append(h('p', { className: 'vide' }, 'Les parcours seront publiés par la direction.'));
+  (ser || []).forEach(sr => {
+    const mes = (sess || []).filter(x => x.series_id === sr.id), k = mes.filter(x => faites.has(x.id)).length;
+    box.append(h('article', { className: 'card' + (sr.active ? '' : ' inactif') }, h('div', { className: 'ligne' }, h('div', {}, h('div', { className: 'auteur' }, sr.title), h('div', { className: 'meta' }, `${sr.days} jours · ${mes.length} session(s) publiée(s)${sr.active ? '' : ' · désactivé'}`)), supprimer('series', sr.id)),
+      sr.description ? h('p', {}, sr.description) : null,
+      mes.length ? h('div', { className: 'meta' }, `Progression : ${Math.round(100 * k / mes.length)} % (${k}/${mes.length})`) : null,
+      h('div', { className: 'actions' }, h('button', { className: 'btn primaire', onclick: async () => { if (!commence.has(sr.id)) await sb.from('member_series').insert({ series_id: sr.id }); serieOuverte = sr; afficher(); } }, commence.has(sr.id) ? 'Continuer' : 'Commencer'),
+        can('parcours') ? h('button', { className: 'btn', onclick: async () => { await sb.from('series').update({ active: !sr.active }).eq('id', sr.id); afficher(); } }, sr.active ? 'Désactiver' : 'Activer') : null)));
+  });
+  return box;
+}
+async function vueSerie() {
+  const sr = serieOuverte, box = h('div', {}, h('div', { className: 'qui', style: 'margin-bottom:.8rem' }, h('button', { className: 'btn lien', onclick: () => { serieOuverte = null; afficher(); } }, '‹ Parcours'), h('h2', {}, sr.title)));
+  if (can('parcours')) box.append(formulaire('Ajouter une session (un jour du parcours)', 'sessions', [
+    { k: 'day_number', label: 'Numéro du jour (1, 2, 3…)', type: 'number', requis: 1 }, { k: 'title', label: 'Titre', requis: 1 }, { k: 'verse', label: 'Passage biblique (référence ou texte)' },
+    { k: 'media_kind', label: 'Contenu', type: 'select', options: [['aucun', 'Aucun média'], ['video', 'Vidéo YouTube'], ['audio', 'Audio (lien direct)']] }, { k: 'media_url', label: 'Lien de la vidéo ou de l’audio', type: 'url' },
+    { k: 'idea', label: 'Idée principale', type: 'textarea' }, { k: 'question', label: 'Question de réflexion', type: 'textarea' }, { k: 'prayer', label: 'Prière', type: 'textarea' }, { k: 'challenge', label: 'Défi du jour (facultatif)' }], { series_id: sr.id }));
+  const [{ data: ss }, { data: fa }] = await Promise.all([sb.from('sessions').select('id,day_number,title').eq('series_id', sr.id).order('day_number'), sb.from('member_sessions').select('session_id,completed_at')]);
+  const faites = new Map((fa || []).map(x => [x.session_id, x.completed_at])), auj = jourLocal(new Date());
+  if (!ss?.length) box.append(h('p', { className: 'vide' }, 'Les sessions de ce parcours arrivent bientôt.'));
+  (ss || []).forEach((x, i) => {
+    const prec = ss[i - 1], fait = faites.has(x.id), dispo = admin() || can('parcours') || fait || !prec || (faites.has(prec.id) && jourLocal(faites.get(prec.id)) < auj);
+    box.append(h('div', { className: 'card ligne' + (dispo ? '' : ' inactif'), style: dispo ? 'cursor:pointer' : '', onclick: () => { if (dispo) { sessionOuverte = x.id; afficher(); } } },
+      h('div', {}, h('div', { className: 'auteur' }, `Jour ${x.day_number} · ${x.title}`), h('div', { className: 'meta' }, fait ? '✅ Terminée' : dispo ? 'Disponible' : '🔒 Disponible après la session précédente (un jour à la fois)')), supprimer('sessions', x.id)));
+  });
+  return box;
+}
+async function vueSession() {
+  const back = () => { sessionOuverte = null; afficher(); };
+  const box = h('div', {}, h('button', { className: 'btn lien', onclick: back }, '‹ Retour'));
+  const [{ data: x }, { data: fait }] = await Promise.all([sb.from('sessions').select('*').eq('id', sessionOuverte).maybeSingle(), sb.from('member_sessions').select('completed_at,challenge_done').eq('session_id', sessionOuverte).maybeSingle()]);
+  if (!x) return box.append(h('p', { className: 'vide' }, 'Session introuvable.')), box;
+  const bloc = (t, c) => c ? h('div', { className: 'card' }, h('div', { className: 'meta' }, t), h('p', { style: 'white-space:pre-wrap;margin:.3rem 0' }, c)) : null;
+  box.append(h('h2', { style: 'margin:.6rem 0' }, `Jour ${x.day_number} · ${x.title}`), bloc('📖 Passage biblique', x.verse));
+  if (x.media_kind === 'video' && ytId(x.media_url)) box.append(h('div', { className: 'card' }, h('div', { className: 'meta' }, '🎥 Courte vidéo'), vignette(ytId(x.media_url))));
+  else if (x.media_kind === 'audio' && x.media_url) box.append(h('div', { className: 'card' }, h('div', { className: 'meta' }, '🎧 À écouter'), h('audio', { controls: true, preload: 'none', src: x.media_url, style: 'width:100%' })));
+  box.append(bloc('🧠 Idée principale', x.idea), bloc('❓ Question de réflexion', x.question), bloc('🙏 Prière', x.prayer));
+  const defi = x.challenge ? h('input', { type: 'checkbox', checked: !!fait?.challenge_done, disabled: !!fait }) : null;
+  if (x.challenge) box.append(h('div', { className: 'card' }, h('div', { className: 'meta' }, '🎯 Défi du jour'), h('p', {}, x.challenge), h('label', { className: 'check' }, defi, 'J’ai accompli ce défi')));
+  const fin = h('button', { className: 'btn primaire', style: 'width:100%' }, fait ? '✅ Session terminée' : 'Session terminée ✓');
+  fin.disabled = !!fait;
+  fin.onclick = async () => {
+    fin.disabled = true;
+    const { error } = await sb.from('member_sessions').insert({ session_id: x.id, challenge_done: !!defi?.checked });
+    if (error) { alert(error.message); fin.disabled = false; return; }
+    await sb.from('member_series').upsert({ series_id: x.series_id }, { onConflict: 'user_id,series_id', ignoreDuplicates: true });
+    const { data: fa } = await sb.from('member_sessions').select('completed_at'); const n = serieEnCours((fa || []).map(d => d.completed_at));
+    toast('Session terminée ✓', `Votre série actuelle : ${n} jour${n > 1 ? 's' : ''} 🔥`); back();
+  };
+  box.append(fin);
+  return box;
+}
+
+// ---------- Mon assemblée ----------
+async function vueMonAssemblee() {
+  const box = h('div', {}, retour('Mon assemblée'));
+  if (!profile.church_id) return box.append(h('div', { className: 'card' }, h('p', {}, 'Choisissez votre assemblée pour accéder à son espace.'),
+    h('button', { className: 'btn primaire', onclick: () => { sous = 'assemblees'; afficher(); } }, 'Choisir mon assemblée'))), box;
+  const cid = profile.church_id;
+  const [{ data: c }, { data: an }, { data: ev }, { data: mb }, { data: rs }] = await Promise.all([
+    sb.from('churches').select('*').eq('id', cid).single(),
+    sb.from('announcements').select('*').eq('church_id', cid).order('created_at', { ascending: false }).limit(10),
+    sb.from('events').select('*').eq('church_id', cid).gte('starts_at', new Date(Date.now() - 864e5).toISOString()).order('starts_at').limit(10),
+    sb.from('profiles').select('id,full_name,avatar_url').eq('church_id', cid).eq('status', 'actif').limit(40),
+    sb.from('church_admins').select('user_id').eq('church_id', cid)]);
+  const gere = can('annonces') || can('agenda') || (rs || []).some(r => r.user_id === session.user.id);
+  box.append(h('div', { className: 'card' }, h('h3', {}, c?.name || 'Mon assemblée'), h('div', { className: 'meta' }, [c?.city, c?.country].filter(Boolean).join(', ')),
+    c?.address ? h('p', {}, h('a', { href: 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(c.address + ' ' + (c.city || '')), target: '_blank', rel: 'noopener' }, '📍 ' + c.address)) : null,
+    c?.service_times ? h('p', {}, '🕒 ' + c.service_times) : null, c?.leader_name ? h('p', { className: 'meta' }, 'Responsable : ' + c.leader_name) : null, c?.description ? h('p', {}, c.description) : null));
+  if (gere) {
+    box.append(formulaire('Publier une annonce locale', 'announcements', [{ k: 'title', label: 'Titre', requis: 1 }, { k: 'body', label: 'Message', type: 'textarea' }, { k: 'category', label: 'Type', type: 'select', options: CAT_ANN }], { church_id: cid }));
+    box.append(formulaire('Ajouter au programme', 'events', [{ k: 'title', label: 'Titre', requis: 1 }, { k: 'category', label: 'Type', type: 'select', options: CAT_EVT }, { k: 'starts_at', label: 'Date et heure', type: 'datetime-local', requis: 1 }, { k: 'location', label: 'Lieu' }, { k: 'description', label: 'Description', type: 'textarea' }], { church_id: cid }));
+  }
+  box.append(h('div', { className: 'card' }, h('h3', {}, '📢 Annonces locales'), ...(an?.length ? an.map(a => h('div', { className: 'com' }, h('div', { className: 'auteur' }, a.title), h('div', { className: 'meta' }, quand(a.created_at)), a.body ? h('p', {}, a.body) : null, gere ? supprimer2('announcements', a.id) : null)) : [h('p', { className: 'meta' }, 'Aucune annonce locale.')])));
+  box.append(h('div', { className: 'card' }, h('h3', {}, '📅 Programme'), ...(ev?.length ? ev.map(e => h('div', { className: 'com' }, h('div', { className: 'auteur' }, e.title), h('div', { className: 'meta' }, new Date(e.starts_at).toLocaleString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) + (e.location ? ' · ' + e.location : '')), gere ? supprimer2('events', e.id) : null)) : [h('p', { className: 'meta' }, 'Aucun événement prévu.')])));
+  box.append(h('div', { className: 'card' }, h('h3', {}, `👥 Membres (${mb?.length || 0})`), h('div', { className: 'qui', style: 'flex-wrap:wrap' }, ...(mb || []).map(u => h('span', { title: u.full_name }, av(u.avatar_url, u.full_name, 40))))));
+  return box;
+}
+const supprimer2 = (table, id) => h('button', { className: 'btn lien', onclick: async () => { if (confirm('Supprimer ?')) { await sb.from(table).delete().eq('id', id); afficher(); } } }, 'Supprimer');
+async function carteRespAssemblees() {
+  const [{ data: eg }, { data: us }, { data: ca }] = await Promise.all([sb.from('churches').select('id,name').order('name'), sb.from('profiles').select('id,full_name').eq('status', 'actif').order('full_name').limit(300), sb.from('church_admins').select('church_id,user_id')]);
+  const carte = h('div', { className: 'card' }, h('h3', {}, 'Responsables d’assemblée'), h('p', { className: 'meta' }, 'Un responsable local peut publier annonces et programme pour son assemblée uniquement.'));
+  const nom = id => (us || []).find(u => u.id === id)?.full_name || 'Membre';
+  const sa = h('select', {}, ...(eg || []).map(c => h('option', { value: c.id }, c.name))), sm = h('select', {}, ...(us || []).map(u => h('option', { value: u.id }, u.full_name || 'Sans nom')));
+  carte.append(sa, sm, h('button', { className: 'btn primaire', onclick: async () => { const { error } = await sb.from('church_admins').insert({ church_id: sa.value, user_id: sm.value }); if (error) alert(error.message); else afficher(); } }, 'Nommer responsable'));
+  (ca || []).forEach(r => carte.append(h('div', { className: 'ligne com' }, h('span', {}, `${nom(r.user_id)} · ${(eg || []).find(c => c.id === r.church_id)?.name || ''}`),
+    h('button', { className: 'btn lien', onclick: async () => { await sb.from('church_admins').delete().eq('church_id', r.church_id).eq('user_id', r.user_id); afficher(); } }, 'Retirer'))));
+  return carte;
+}
+
 async function vueAdmin() {
   const box = h('div', {}, retour('Administration'));
   const compte = t => sb.from(t).select('id', { count: 'exact', head: true }).then(r => r.count ?? 0);
@@ -1010,6 +1248,7 @@ async function vueAdmin() {
       if (confirm(`Supprimer « ${g.name} » et toutes ses publications ?`)) { await sb.from('groups').delete().eq('id', g.id); afficher(); }
     } }, 'Supprimer'))));
   box.append(lg);
+  if (can('assemblees')) box.append(await carteRespAssemblees());
 
   if (admin() || can('moderer')) {
     const { data: us } = await sb.from('profiles').select('id,full_name,role,status').order('created_at');
@@ -1047,15 +1286,17 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 // ---------- Son, bannières et accusés de livraison ----------
 let canalGlobal = null, audioCtx = null, invitation = null; const noms = new Map();
 const debloquerAudio = () => { try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume?.(); } catch {} };
-document.addEventListener('click', debloquerAudio); document.addEventListener('touchstart', debloquerAudio, { passive: true });
+['click', 'pointerup', 'touchend', 'keydown'].forEach(ev => document.addEventListener(ev, debloquerAudio, { passive: true }));
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); invitation = e; if (!session) afficher(); });
 function bip() {
-  if (audioCtx) [[880, 0], [1175, .14]].forEach(([f, t]) => {
+  navigator.vibrate?.([90, 40, 90]);
+  try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); } catch { return; }
+  const jouer = () => [[880, 0], [1175, .14]].forEach(([f, t]) => {
     const o = audioCtx.createOscillator(), g = audioCtx.createGain(), d = audioCtx.currentTime + t;
     o.type = 'sine'; o.frequency.value = f; o.connect(g); g.connect(audioCtx.destination);
-    g.gain.setValueAtTime(.0001, d); g.gain.exponentialRampToValueAtTime(.3, d + .02); g.gain.exponentialRampToValueAtTime(.0001, d + .24); o.start(d); o.stop(d + .26);
+    g.gain.setValueAtTime(.0001, d); g.gain.exponentialRampToValueAtTime(.35, d + .02); g.gain.exponentialRampToValueAtTime(.0001, d + .24); o.start(d); o.stop(d + .26);
   });
-  navigator.vibrate?.([90, 40, 90]);
+  if (audioCtx.state === 'running') jouer(); else audioCtx.resume().then(jouer).catch(() => {});
 }
 function toast(titre, texte, action) {
   document.querySelectorAll('.toast').forEach(x => x.remove());
@@ -1091,22 +1332,47 @@ function demarrerEcoute() {
       if (p.new.kind === 'message') return;
       majBadges(); if (!document.hidden) { bip(); toast(p.new.title, p.new.body || ''); }
     })
-    .subscribe();
+    .subscribe(st => { if (st === 'SUBSCRIBED') synchro(); });
+  if (!window.__synchro) {
+    window.__synchro = true;
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) synchro(); });
+    window.addEventListener('online', synchro);
+    setInterval(() => { if (!document.hidden) synchro(); }, 20000);
+  }
+}
+let derniereSynchro = 0;
+function synchro() {
+  if (!session || Date.now() - derniereSynchro < 3000) return; derniereSynchro = Date.now();
+  sb.rpc('marquer_livre'); majBadges();
+  if (tab === 'messages' && !conv && !ecranContact) afficher();
 }
 
 // ---------- Notifications push (application fermée) ----------
 const VAPID_PUBLIC = 'BPK5qK_h0xjUWtMBHi5ZzlUO6PiDMxo0yPayOvZjNVyr9sBDeqjx4mBRLliXiu4X-0vLlIcN7S3L4P72evPHXKQ';
 const cleB64 = v => Uint8Array.from(atob(v.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - v.length % 4) % 4)), c => c.charCodeAt(0));
+async function enregistrerAppareil() {
+  const reg = await navigator.serviceWorker.ready;
+  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: cleB64(VAPID_PUBLIC) });
+  const j = sub.toJSON();
+  const { error } = await sb.rpc('enregistrer_push', { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth });
+  if (error) throw error;
+}
 async function activerPush() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window))
     throw new Error('Notifications non prises en charge ici. Sur iPhone, installez d’abord l’application sur l’écran d’accueil.');
   const perm = await Notification.requestPermission();
   if (perm !== 'granted') throw new Error('Notifications refusées. Autorisez-les dans les réglages du navigateur.');
-  const reg = await navigator.serviceWorker.ready;
-  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: cleB64(VAPID_PUBLIC) });
-  const j = sub.toJSON();
-  const { error } = await sb.from('push_subscriptions').upsert({ user_id: session.user.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: 'endpoint' });
-  if (error) throw error;
+  await enregistrerAppareil();
+}
+// À chaque connexion, l'appareil est rattaché au compte actuel (sans demande)
+function majPushAuto() { if ('Notification' in window && 'PushManager' in window && Notification.permission === 'granted') enregistrerAppareil().catch(() => {}); }
+const memoriserUid = uid => { if ('caches' in window) caches.open('mna-meta').then(c => c.put('uid', new Response(uid))).catch(() => {}); };
+async function deconnexion() {
+  try {
+    const reg = await navigator.serviceWorker?.ready, sub = await reg?.pushManager?.getSubscription();
+    if (sub) await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+  } catch (_) {}
+  memoriserUid(''); await sb.auth.signOut();
 }
 
 // ---------- Infos du contact (style WhatsApp) ----------

@@ -121,3 +121,12 @@ nav button.alerte{color:var(--rouge);font-weight:600}
 .logo-tete{display:block;height:38px;width:auto}
 .logo-login{display:block;width:min(100%,300px);height:auto;margin:0 auto 1.4rem}
 .boot{display:flex;justify-content:center;padding:30vh 1rem 0}.boot img{width:180px;height:auto}
+
+/* ---- Ma journée, communauté ---- */
+.journee{border-color:var(--or)}
+.journee .bloc{padding:.6rem 0;border-top:1px solid var(--ligne)}.journee h3+.bloc{border-top:0}
+.journee .btn{margin-top:.4rem}
+.kpis{display:grid;grid-template-columns:repeat(2,1fr);gap:.6rem;margin-top:.6rem}
+.kpi{background:var(--fond);border-radius:10px;padding:.6rem;display:flex;flex-direction:column}
+.kpi b{font-size:1.4rem;color:var(--nuit)}.kpi span{font-size:.8rem;color:var(--doux)}
+.inactif{opacity:.6}
