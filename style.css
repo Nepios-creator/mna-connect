@@ -1,11 +1,10 @@
-:root{--nuit:#16284a;--ciel:#3d6fb0;--or:#b8863a;--fond:#f5f7fb;--carte:#fff;--texte:#1a2333;--doux:#5d6b82;--ligne:#e1e6ef;--rouge:#b3372f}
+:root{--nuit:#042b72;--ciel:#0462c5;--or:#d99a1e;--fond:#f5f7fb;--carte:#fff;--texte:#1a2333;--doux:#5d6b82;--ligne:#e1e6ef;--rouge:#b3372f}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--fond);color:var(--texte);font:16px/1.5 Figtree,system-ui,sans-serif}
 h1,h2,h3{font-family:Newsreader,Georgia,serif;font-weight:600;margin:0}
 button,input,textarea,select{font:inherit}
 .boot{text-align:center;padding:4rem 1rem;color:var(--doux)}
-header{position:sticky;top:0;z-index:5;background:var(--nuit);color:#fff;padding:calc(.7rem + env(safe-area-inset-top)) 1rem .7rem}
-header h1{font-size:1.25rem}header small{display:block;opacity:.75;font-size:.78rem}
+header{position:sticky;top:0;z-index:5;background:#fff;border-bottom:1px solid var(--ligne);padding:calc(.45rem + env(safe-area-inset-top)) 1rem .45rem}
 main{padding:1rem 1rem calc(5.5rem + env(safe-area-inset-bottom));max-width:640px;margin:0 auto}
 nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid var(--ligne);padding-bottom:env(safe-area-inset-bottom)}
 nav button{flex:1;border:0;background:none;padding:.8rem .2rem;color:var(--doux);font-weight:500;min-height:52px}
@@ -103,3 +102,22 @@ a.btn{display:inline-block;text-decoration:none;margin-top:.5rem}
 .grille-med img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;cursor:pointer}
 .grille-med .tuile{display:flex;align-items:center;padding:.4rem;background:var(--fond);border-radius:4px;font-size:.8rem;overflow:hidden;color:var(--texte)}
 .grille-med p{grid-column:1/-1}
+
+/* ---- Statuts, recadrage, nouveautés ---- */
+.pastille.rouge{background:var(--rouge)}
+nav button.alerte{color:var(--rouge);font-weight:600}
+.menu .btn{display:flex;justify-content:space-between;align-items:center;gap:.6rem}
+.actions{flex-wrap:wrap}
+.chat .texte,.bulle .texte{white-space:pre-wrap}
+.wa-champ textarea{border:0;margin:0;padding:.7rem 0;flex:1;background:none;min-width:0;resize:none;max-height:120px;line-height:1.35;font:inherit}
+.wa-champ textarea:focus{outline:none}
+.modale{position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:1rem;overflow:auto}
+.rogne{background:#fff;border-radius:14px;padding:1rem;width:100%;max-width:380px;max-height:100%;overflow:auto}
+.rogne-zone{position:relative;width:300px;height:300px;margin:.6rem auto;touch-action:none;background:#000;overflow:hidden}
+.rogne-cv{display:block;touch-action:none;cursor:grab}
+.rogne-masque{position:absolute;inset:0;border-radius:50%;box-shadow:0 0 0 400px rgba(0,0,0,.55);pointer-events:none;border:2px solid #fff}
+
+/* ---- Logo ---- */
+.logo-tete{display:block;height:38px;width:auto}
+.logo-login{display:block;width:min(100%,300px);height:auto;margin:0 auto 1.4rem}
+.boot{display:flex;justify-content:center;padding:30vh 1rem 0}.boot img{width:180px;height:auto}

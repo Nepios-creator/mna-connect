@@ -95,7 +95,7 @@ function afficher() {
   const nav = h('nav', {}, ...onglets.map(([k, l]) =>
     h('button', { className: tab === k ? 'on' : '', onclick: () => { tab = k; groupe = null; conv = null; sous = null; afficher(); } }, l)));
   majBadges(nav);
-  root.append(h('header', {}, h('h1', {}, 'MNA Connect'), h('small', {}, 'Le réseau de la Nouvelle Alliance')), main, nav);
+  root.append(h('header', {}, h('img', { src: 'logo-entete.png', alt: 'MNA Connect', className: 'logo-tete' })), main, nav);
   if (tab === 'accueil' && 'Notification' in window && 'PushManager' in window && Notification.permission === 'default' && !sessionStorage.getItem('pushIgnore'))
     main.append(h('div', { className: 'card epingle' }, h('p', {}, '🔔 Recevoir les messages et annonces même quand l’application est fermée ?'),
       h('div', { className: 'actions' }, h('button', { className: 'btn primaire', onclick: async () => { try { await activerPush(); } catch (e) { alert(e.message); } afficher(); } }, 'Activer'),
@@ -141,7 +141,7 @@ function vueAuth() {
       h('button', { className: 'btn' + (parTel ? '' : ' primaire'), onclick: () => { parTel = false; dessiner(); } }, 'E-mail'),
       h('button', { className: 'btn' + (parTel ? ' primaire' : ''), onclick: () => { parTel = true; dessiner(); } }, 'Téléphone'));
     const bascule = h('button', { className: 'btn lien', onclick: () => { inscription = !inscription; dessiner(); } }, inscription ? 'J’ai déjà un compte' : 'Créer un compte');
-    wrap.replaceChildren(h('h1', {}, 'MNA Connect'), h('p', { className: 'sous' }, 'Le réseau de la Nouvelle Alliance'), onglets,
+    wrap.replaceChildren(h('img', { src: 'logo.png', alt: 'MNA Connect – Le réseau de la Nouvelle Alliance', className: 'logo-login' }), onglets,
       inscription ? nom : null, (inscription || !parTel) ? email : null, (inscription || parTel) ? tel : null, mdpC.el, msg, go, h('p', {}, bascule),
       invitation ? h('button', { className: 'btn primaire', style: 'width:100%;margin-top:1rem', onclick: () => invitation.prompt() }, '📲 Installer l’application sur mon téléphone') : null);
   };
@@ -150,7 +150,6 @@ function vueAuth() {
 }
 async function vueFil(groupId) {
   const box = h('div');
-  if (!groupId) box.append(await barreStatuts());
   const texte = h('textarea', { rows: 3, placeholder: 'Partagez quelque chose avec la communauté…' });
   const err = h('p', { className: 'erreur' });
   const pub = h('button', { className: 'btn primaire' }, 'Publier');
@@ -979,141 +978,6 @@ function rogner(file) {
       h('div', { className: 'actions', style: 'justify-content:flex-end' }, h('button', { className: 'btn', onclick: () => fin(null) }, 'Annuler'), ok)));
     document.body.append(modale); dessiner();
   });
-}
-
-// ---------- Statuts (24 h) ----------
-const FONDS = ['#16284a', '#7a3b2e', '#2e6b4f', '#5b3a82', '#b8863a', '#2b2b2b'];
-async function barreStatuts() {
-  const barre = h('div', { className: 'stories' });
-  const [{ data: sts }, { data: vus }] = await Promise.all([
-    sb.from('statuses').select('id,author_id,kind,content,bg,media_path,created_at,profiles!statuses_author_id_fkey(full_name,avatar_url)').order('created_at'),
-    sb.from('status_views').select('status_id').eq('viewer_id', session.user.id)]);
-  const vu = new Set((vus || []).map(v => v.status_id)), par = new Map();
-  (sts || []).forEach(x => { if (!par.has(x.author_id)) par.set(x.author_id, []); par.get(x.author_id).push(x); });
-  const moi = par.get(session.user.id) || [];
-  barre.append(h('div', { className: 'story' },
-    h('div', { className: 'anneau' + (moi.length ? '' : ' vide'), onclick: () => moi.length ? ouvrirVisionneuse(moi, new Set(moi.map(x => x.id))) : creerStatut() },
-      av(profile.avatar_url, profile.full_name, 56), h('span', { className: 'plus', onclick: e => { e.stopPropagation(); creerStatut(); } }, '+')),
-    h('div', { className: 'meta coupe' }, 'Mon statut')));
-  [...par.entries()].filter(([id]) => id !== session.user.id)
-    .sort((a, b) => Number(b[1].some(x => !vu.has(x.id))) - Number(a[1].some(x => !vu.has(x.id))))
-    .forEach(([, liste]) => { const p = liste[0].profiles, neuf = liste.some(x => !vu.has(x.id));
-      barre.append(h('div', { className: 'story', onclick: () => ouvrirVisionneuse(liste, vu) },
-        h('div', { className: 'anneau' + (neuf ? '' : ' vu') }, av(p?.avatar_url, p?.full_name, 56)), h('div', { className: 'meta coupe' }, (p?.full_name || 'Membre').split(' ')[0]))); });
-  return barre;
-}
-
-function creerStatut() {
-  let fond = 0, fichier = null, type = 'texte';
-  const zoneTexte = h('textarea', { placeholder: 'Écrivez votre statut…', maxLength: 300, rows: 5 });
-  const apercu = h('div', { className: 'st-apercu', style: `background:${FONDS[0]}` }, zoneTexte);
-  const legende = h('input', { placeholder: 'Ajouter une légende (facultatif)', style: 'display:none' });
-  const msg = h('p', { className: 'erreur' });
-  const input = h('input', { type: 'file', accept: 'image/*,video/*', hidden: true });
-  const fin = () => modale.remove();
-  const couleur = h('button', { className: 'btn', onclick: () => { if (type !== 'texte') return; fond = (fond + 1) % FONDS.length; apercu.style.background = FONDS[fond]; } }, '🎨 Couleur');
-  input.onchange = async () => {
-    const f = input.files[0]; if (!f) return; msg.textContent = '';
-    if (f.type.startsWith('video/')) {
-      if (f.size > 20 * 1024 * 1024) { msg.textContent = 'Vidéo trop lourde (20 Mo maximum).'; return; }
-      const v = document.createElement('video'); v.preload = 'metadata'; v.src = URL.createObjectURL(f);
-      await new Promise(r => { v.onloadedmetadata = r; v.onerror = r; });
-      if (v.duration > 60) { msg.textContent = 'Vidéo trop longue (60 secondes maximum).'; return; }
-      type = 'video'; apercu.replaceChildren(h('video', { src: v.src, muted: true, playsInline: true, controls: true, style: 'max-width:100%;max-height:50vh' }));
-    } else { type = 'image'; apercu.replaceChildren(h('img', { src: URL.createObjectURL(f), style: 'max-width:100%;max-height:50vh' })); }
-    apercu.style.background = '#000'; fichier = f; legende.style.display = ''; couleur.style.display = 'none';
-  };
-  const publier = h('button', { className: 'btn primaire' }, 'Publier mon statut (24 h)');
-  publier.onclick = async () => {
-    msg.textContent = ''; publier.disabled = true;
-    try {
-      let ligne;
-      if (type === 'texte') { const t = zoneTexte.value.trim(); if (!t) throw new Error('Écrivez un texte ou choisissez une photo ou vidéo.'); ligne = { kind: 'texte', content: t, bg: FONDS[fond] }; }
-      else {
-        let blob = fichier, mime = fichier.type, ext = 'mp4';
-        if (type === 'image') { blob = await reduireImage(fichier); mime = 'image/jpeg'; ext = 'jpg'; } else ext = mime.includes('webm') ? 'webm' : mime.includes('quicktime') ? 'mov' : 'mp4';
-        const chemin = `${session.user.id}/${crypto.randomUUID()}.${ext}`;
-        const up = await sb.storage.from('statuts').upload(chemin, blob, { contentType: mime }); if (up.error) throw up.error;
-        ligne = { kind: type, media_path: chemin, content: legende.value.trim() || null };
-      }
-      const { error } = await sb.from('statuses').insert(ligne); if (error) throw error;
-      fin(); afficher();
-    } catch (e) { msg.textContent = e.message || 'Échec de la publication'; }
-    publier.disabled = false;
-  };
-  const modale = h('div', { className: 'modale' }, h('div', { className: 'rogne' }, h('h3', {}, 'Nouveau statut'), apercu, legende, msg,
-    h('div', { className: 'actions', style: 'flex-wrap:wrap' }, couleur, h('button', { className: 'btn', onclick: () => input.click() }, '📷 Photo ou vidéo'), input),
-    h('div', { className: 'actions', style: 'justify-content:flex-end' }, h('button', { className: 'btn', onclick: fin }, 'Annuler'), publier)));
-  document.body.append(modale);
-}
-
-async function ouvrirVisionneuse(liste, vus) {
-  const me = session.user.id;
-  let i = Math.max(0, liste.findIndex(x => !vus.has(x.id))), minuteur = null, video = null;
-  const racine = h('div', { className: 'visionneuse' });
-  const fermer = () => { clearTimeout(minuteur); video?.pause(); racine.remove(); afficher(); };
-  const { data: ml } = await sb.from('status_likes').select('status_id').eq('user_id', me).in('status_id', liste.map(x => x.id));
-  const aimes = new Set((ml || []).map(x => x.status_id));
-  function montrer(k) {
-    clearTimeout(minuteur); video?.pause(); video = null;
-    if (k >= liste.length) return fermer();
-    i = Math.max(0, k); const s = liste[i], mien = s.author_id === me;
-    const barres = h('div', { className: 'barres' }, ...liste.map((_, j) => h('div', { className: 'barre' }, h('div', { className: j < i ? 'plein' : '' }))));
-    const jauge = barres.children[i].firstChild;
-    const duree = d => { jauge.style.transition = `width ${d}s linear`; requestAnimationFrame(() => requestAnimationFrame(() => { jauge.style.width = '100%'; })); };
-    const suivant = d => { duree(d); minuteur = setTimeout(() => montrer(i + 1), d * 1000); };
-    let corps;
-    if (s.kind === 'texte') { corps = h('div', { className: 'st-texte', style: `background:${s.bg || FONDS[0]}` }, h('div', {}, s.content)); suivant(6); }
-    else {
-      corps = h('div', { className: 'st-media' });
-      urlSignee('statuts', s.media_path).then(u => {
-        if (!u || liste[i] !== s) return;
-        if (s.kind === 'image') { corps.prepend(h('img', { src: u })); suivant(6); }
-        else { video = h('video', { src: u, autoplay: true, playsInline: true }); video.onloadedmetadata = () => duree(video.duration || 10); video.onended = () => montrer(i + 1); corps.prepend(video); }
-      });
-      if (s.content) corps.append(h('div', { className: 'legende' }, s.content));
-    }
-    const p = s.profiles;
-    const entete = h('div', { className: 'st-tete' }, av(mien ? profile.avatar_url : p?.avatar_url, mien ? profile.full_name : p?.full_name, 36),
-      h('div', { style: 'flex:1;min-width:0' }, h('div', { className: 'coupe', style: 'font-weight:600' }, mien ? 'Mon statut' : p?.full_name || 'Membre'), h('div', { style: 'font-size:.78rem;opacity:.8' }, jourHeure(s.created_at))),
-      mien || can('moderer') ? h('button', { className: 'st-btn', title: 'Supprimer', onclick: async () => {
-        if (!confirm('Supprimer ce statut ?')) return;
-        if (s.media_path) await sb.storage.from('statuts').remove([s.media_path]);
-        await sb.from('statuses').delete().eq('id', s.id); fermer(); } }, '🗑️') : null,
-      h('button', { className: 'st-btn', onclick: fermer }, '✕'));
-    const gauche = h('div', { className: 'tap g', onclick: () => montrer(i - 1) }), droite = h('div', { className: 'tap d', onclick: () => montrer(i + 1) });
-    let pied;
-    if (mien) {
-      pied = h('div', { className: 'st-pied' }, h('button', { className: 'btn', onclick: async () => {
-        clearTimeout(minuteur); video?.pause();
-        const [{ data: vv }, { data: ll }] = await Promise.all([
-          sb.from('status_views').select('viewer_id,viewed_at,profiles!status_views_viewer_id_fkey(full_name,avatar_url)').eq('status_id', s.id).order('viewed_at', { ascending: false }),
-          sb.from('status_likes').select('user_id').eq('status_id', s.id)]);
-        const aime = new Set((ll || []).map(x => x.user_id));
-        const panneau = h('div', { className: 'panneau' }, h('div', { className: 'ligne' }, h('b', {}, `👁 ${vv?.length || 0} vue(s) · ❤️ ${aime.size}`), h('button', { className: 'btn lien', onclick: () => { panneau.remove(); montrer(i); } }, 'Fermer')),
-          ...(vv || []).map(x => h('div', { className: 'qui com' }, av(x.profiles?.avatar_url, x.profiles?.full_name, 32), h('span', { style: 'flex:1' }, x.profiles?.full_name || 'Membre'), aime.has(x.viewer_id) ? '❤️' : null, h('span', { className: 'meta' }, heureCourte(x.viewed_at)))));
-        racine.append(panneau);
-      } }, '👁 Qui a vu mon statut ?'));
-    } else {
-      sb.from('status_views').insert({ status_id: s.id });
-      const champ = h('input', { placeholder: 'Répondre…' });
-      champ.onfocus = () => { clearTimeout(minuteur); video?.pause(); };
-      const like = h('button', { className: 'st-btn' }, aimes.has(s.id) ? '❤️' : '🤍');
-      like.onclick = async () => { const r = aimes.has(s.id) ? await sb.from('status_likes').delete().eq('status_id', s.id).eq('user_id', me) : await sb.from('status_likes').insert({ status_id: s.id }); if (!r.error) { aimes.has(s.id) ? aimes.delete(s.id) : aimes.add(s.id); like.textContent = aimes.has(s.id) ? '❤️' : '🤍'; } };
-      const envoi = h('button', { className: 'st-btn', title: 'Envoyer la réponse' }, '➤');
-      envoi.onclick = async () => {
-        const t = champ.value.trim(); if (!t) return;
-        const r = await sb.rpc('start_conversation', { autre: s.author_id }); if (r.error) return alert(r.error.message);
-        const cit = s.kind === 'texte' ? s.content.slice(0, 80) : s.kind === 'image' ? '📷 Photo' : '🎥 Vidéo';
-        const { error } = await sb.from('messages').insert({ conversation_id: r.data, kind: 'texte', content: `↩️ Réponse à votre statut « ${cit} »\n${t}` });
-        if (error) return alert(error.code === '42501' ? 'Message non envoyé.' : error.message);
-        champ.value = ''; toast('Réponse envoyée', 'Dans votre discussion avec ' + (p?.full_name || 'ce membre'));
-      };
-      pied = h('div', { className: 'st-pied rep' }, champ, envoi, like, h('button', { className: 'st-btn', title: 'Partager', onclick: () => partager('MNA Connect', 'Découvre les statuts sur MNA Connect') }, '↗️'));
-    }
-    racine.replaceChildren(barres, entete, corps, gauche, droite, pied);
-  }
-  document.body.append(racine); montrer(i);
 }
 
 async function vueAdmin() {
