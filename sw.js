@@ -1,4 +1,4 @@
-const V = 'mna-v13', SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'logo-192.png', 'logo-512.png', 'logo.png', 'logo-entete.png'];
+const V = 'mna-v14', SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'logo-192.png', 'logo-512.png', 'logo.png', 'logo-entete.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(V).then(c => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(k => Promise.all(k.filter(x => x !== V && x !== 'mna-meta').map(x => caches.delete(x))))); self.clients.claim(); });
 self.addEventListener('fetch', e => {

@@ -78,6 +78,7 @@ async function charger() {
     profile = r.data;
     if (profile) profile.phone = (await sb.rpc('mon_telephone')).data;
     perms = new Set(((await sb.from('admin_permissions').select('permission').eq('user_id', session.user.id)).data || []).map(x => x.permission));
+    if (!profile && r.error?.code === 'PGRST116') { await sb.auth.signOut(); session = null; alert('Ce compte n’existe plus. Vous pouvez créer un nouveau compte avec la même adresse.'); }
   }
   if (session) { demarrerPresence(); demarrerEcoute(); memoriserUid(session.user.id); majPushAuto(); } else { arreterPresence(); memoriserUid(''); }
   afficher();
@@ -594,7 +595,7 @@ async function vueConv() {
 const admin = () => profile?.role === 'admin';
 const can = p => profile?.role === 'admin' || perms.has(p);
 const PERM_TABLE = { announcements: 'annonces', videos: 'videos', teachings: 'enseignements', events: 'agenda', churches: 'assemblees', meditations: 'meditations', series: 'parcours', sessions: 'parcours' };
-const PERMS = [['publier', 'Publier à l’accueil et épingler'], ['annonces', 'Annonces'], ['videos', 'Vidéothèque et directs'], ['enseignements', 'Enseignements'], ['agenda', 'Agenda'], ['meditations', 'Méditation du jour'], ['assemblees', 'Assemblées'], ['groupes', 'Communautés (créer, supprimer)'], ['bibliotheque', 'Lien de la bibliothèque'], ['moderer', 'Modération : signalements, suppressions, suspensions'], ['parcours', 'Parcours « 5 minutes avec Christ »']];
+const PERMS = [['publier', 'Publier à l’accueil et épingler'], ['annonces', 'Annonces'], ['videos', 'Vidéothèque et directs'], ['enseignements', 'Enseignements'], ['agenda', 'Agenda'], ['meditations', 'Méditation du jour'], ['assemblees', 'Assemblées'], ['groupes', 'Communautés (créer, supprimer)'], ['bibliotheque', 'Lien de la bibliothèque'], ['moderer', 'Modération : signalements, suppressions, suspensions'], ['parcours', 'Parcours « 5 minutes avec Christ »'], ['supprimer_comptes', 'Supprimer des comptes (membres simples)']];
 const lab = (liste, v) => (liste.find(x => x[0] === v) || [v, v])[1];
 const CAT_ANN = [['generale', 'Générale'], ['reunion', 'Réunion'], ['culte', 'Culte'], ['conference', 'Conférence'], ['formation', 'Formation'], ['evenement', 'Événement'], ['important', 'Important']];
 const CAT_VID = [['culte', 'Cultes'], ['predication', 'Prédications'], ['enseignement', 'Enseignements'], ['conference', 'Conférences'], ['formation', 'Formations'], ['temoignage', 'Témoignages']];
@@ -674,7 +675,7 @@ async function vuePlus() {
   if (sous && SECTIONS[sous]) { sb.rpc('marquer_section', { sec: sous }).then(() => majBadges()); return SECTIONS[sous][1](); }
   const { data } = await sb.rpc('nouveautes'); nouv = Object.fromEntries((data || []).map(x => [x.section, Number(x.n)]));
   const box = h('div', { className: 'menu' }, h('h2', { style: 'margin-bottom:.8rem' }, 'Plus'));
-  Object.entries(SECTIONS).filter(([k]) => k === 'admin' ? (admin() || can('groupes')) : k === 'signalements' ? can('moderer') : true).forEach(([k, [titre]]) =>
+  Object.entries(SECTIONS).filter(([k]) => k === 'admin' ? (admin() || can('groupes') || can('supprimer_comptes')) : k === 'signalements' ? can('moderer') : true).forEach(([k, [titre]]) =>
     box.append(h('button', { className: 'btn', onclick: () => { sous = k; afficher(); } }, h('span', {}, titre), nouv[k] > 0 ? h('span', { className: 'pastille rouge' }, 'Nouveau · ' + nouv[k]) : null)));
   return box;
 }
@@ -864,6 +865,7 @@ async function vueSignalements() {
       h('div', { className: 'actions', style: 'flex-wrap:wrap' },
         suppr ? h('button', { onclick: () => confirm('Supprimer ce contenu ?') && fin(suppr) }, 'Supprimer le contenu') : null,
         auteur && auteur !== session.user.id ? h('button', { onclick: () => confirm('Suspendre ce compte ?') && fin(() => sb.from('profiles').update({ status: 'suspendu' }).eq('id', auteur)) }, 'Suspendre l’auteur') : null,
+        auteur && auteur !== session.user.id && can('supprimer_comptes') ? h('button', { onclick: async () => { await supprimerCompte(auteur, ''); } }, 'Supprimer le compte') : null,
         h('button', { onclick: () => fin(async () => {}) }, 'Classer sans suite'))));
   }
   return box;
@@ -1218,6 +1220,14 @@ async function carteRespAssemblees() {
   return carte;
 }
 
+async function supprimerCompte(id, nom) {
+  if (!confirm(`Supprimer définitivement le compte de « ${nom || 'ce membre'} » ?\n\nSes publications, messages, photos et données seront effacés. Cette personne pourra se réinscrire comme un tout nouveau membre.\n\nCette action est irréversible.`)) return;
+  const { data, error } = await sb.functions.invoke('supprimer-compte', { body: { user_id: id } });
+  if (error) { let m = 'Suppression impossible. Réessayez.'; try { m = (await error.context.json()).error || m; } catch (_) {} return alert(m); }
+  if (!data?.ok) return alert(data?.error || 'Suppression impossible.');
+  toast('Compte supprimé', nom || ''); afficher();
+}
+
 async function vueAdmin() {
   const box = h('div', {}, retour('Administration'));
   const compte = t => sb.from(t).select('id', { count: 'exact', head: true }).then(r => r.count ?? 0);
@@ -1250,7 +1260,7 @@ async function vueAdmin() {
   box.append(lg);
   if (can('assemblees')) box.append(await carteRespAssemblees());
 
-  if (admin() || can('moderer')) {
+  if (admin() || can('moderer') || can('supprimer_comptes')) {
     const { data: us } = await sb.from('profiles').select('id,full_name,role,status').order('created_at');
     const { data: pr } = admin() ? await sb.from('admin_permissions').select('user_id,permission') : { data: [] };
     const droits = {}; (pr || []).forEach(x => { (droits[x.user_id] = droits[x.user_id] || new Set()).add(x.permission); });
@@ -1273,9 +1283,11 @@ async function vueAdmin() {
         };
         zone.append(h('div', { className: 'card' }, ...cases.map(x => x[2]), enr));
       } }, 'Droits') : null;
+      const bSuppr = soi || principal || !(admin() || (can('supprimer_comptes') && u.role === 'membre')) ? null
+        : h('button', { className: 'btn lien', style: 'color:var(--rouge)', onclick: () => supprimerCompte(u.id, u.full_name) }, 'Supprimer le compte');
       const etiquette = principal ? 'Administrateur principal' : u.role === 'responsable' ? `Administrateur délégué (${droits[u.id]?.size ?? '…'} droit${(droits[u.id]?.size || 0) > 1 ? 's' : ''})` : 'Membre';
       lm.append(h('div', { className: 'com' }, h('div', { className: 'auteur' }, (u.full_name || 'Sans nom') + (u.status === 'suspendu' ? ' (suspendu)' : '')),
-        h('div', { className: 'ligne' }, h('span', { className: 'meta' }, etiquette), h('span', {}, bDroits, susp)), zone));
+        h('div', { className: 'ligne' }, h('span', { className: 'meta' }, etiquette), h('span', {}, bDroits, susp, bSuppr)), zone));
     });
     box.append(lm);
   }
