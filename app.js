@@ -36,10 +36,15 @@ const champMdp = (ph, ac) => {
   oeil.onclick = () => { const cache = input.type === 'password'; input.type = cache ? 'text' : 'password'; oeil.textContent = cache ? '🙈' : '👁'; };
   return { input, el: h('div', { className: 'mdp' }, input, oeil) };
 };
+let nouv = {};
 function majBadges(nav) {
   nav = nav || document.querySelector('nav'); if (!nav) return;
   sb.rpc('mes_conversations').then(r => { const n = (r.data || []).reduce((a, c) => a + (c.muted ? 0 : Number(c.non_lus)), 0); nav.children[2].textContent = n > 0 ? `Messages (${n})` : 'Messages'; });
-  sb.from('notifications').select('id', { count: 'exact', head: true }).eq('read', false).neq('kind', 'message').then(r => { nav.children[3].textContent = r.count > 0 ? `Plus (${r.count})` : 'Plus'; });
+  sb.rpc('nouveautes').then(r => {
+    nouv = Object.fromEntries((r.data || []).map(x => [x.section, Number(x.n)]));
+    const n = Object.values(nouv).reduce((a, b) => a + b, 0);
+    nav.children[3].textContent = n > 0 ? `Plus (${n})` : 'Plus'; nav.children[3].classList.toggle('alerte', n > 0);
+  });
 }
 const enLigne = new Set(); let canalPresence = null, canalConv = null, surPresence = null, battementId = null;
 function demarrerPresence() {
@@ -56,6 +61,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) { canalPresence.untrack(); sb.from('profiles').update({ last_seen_at: new Date().toISOString() }).eq('id', session.user.id); }
   else canalPresence.track({ t: Date.now() });
 });
+let perms = new Set();
 let session = null, profile = null, tab = 'accueil', groupe = null, conv = null, sous = null, ecranContact = false;
 
 async function charger() {
@@ -66,6 +72,7 @@ async function charger() {
     const r = await sb.from('profiles').select('id,full_name,avatar_url,bio,church_id,role,status,show_bio,show_church,last_seen_at,show_online,show_phone').eq('id', session.user.id).single();
     profile = r.data;
     if (profile) profile.phone = (await sb.rpc('mon_telephone')).data;
+    perms = new Set(((await sb.from('admin_permissions').select('permission').eq('user_id', session.user.id)).data || []).map(x => x.permission));
   }
   if (session) { demarrerPresence(); demarrerEcoute(); } else arreterPresence();
   afficher();
@@ -135,13 +142,15 @@ function vueAuth() {
       h('button', { className: 'btn' + (parTel ? ' primaire' : ''), onclick: () => { parTel = true; dessiner(); } }, 'Téléphone'));
     const bascule = h('button', { className: 'btn lien', onclick: () => { inscription = !inscription; dessiner(); } }, inscription ? 'J’ai déjà un compte' : 'Créer un compte');
     wrap.replaceChildren(h('h1', {}, 'MNA Connect'), h('p', { className: 'sous' }, 'Le réseau de la Nouvelle Alliance'), onglets,
-      inscription ? nom : null, (inscription || !parTel) ? email : null, (inscription || parTel) ? tel : null, mdpC.el, msg, go, h('p', {}, bascule));
+      inscription ? nom : null, (inscription || !parTel) ? email : null, (inscription || parTel) ? tel : null, mdpC.el, msg, go, h('p', {}, bascule),
+      invitation ? h('button', { className: 'btn primaire', style: 'width:100%;margin-top:1rem', onclick: () => invitation.prompt() }, '📲 Installer l’application sur mon téléphone') : null);
   };
   dessiner();
   return wrap;
 }
 async function vueFil(groupId) {
   const box = h('div');
+  if (!groupId) box.append(await barreStatuts());
   const texte = h('textarea', { rows: 3, placeholder: 'Partagez quelque chose avec la communauté…' });
   const err = h('p', { className: 'erreur' });
   const pub = h('button', { className: 'btn primaire' }, 'Publier');
@@ -170,28 +179,31 @@ async function vueFil(groupId) {
     } catch (e) { err.textContent = e.message || 'Échec de la publication'; }
     pub.disabled = false;
   };
-  box.append(h('div', { className: 'card' }, texte, apercu, err, h('div', { className: 'actions' }, bPhoto, pub, fichier)), liste);
+  if (groupId || can('publier')) box.append(h('div', { className: 'card' }, texte, apercu, err, h('div', { className: 'actions' }, bPhoto, pub, fichier)));
+  box.append(liste);
 
   async function remplir() {
     let q = sb.from('posts').select('id,content,pinned,created_at,author_id,media_url,media_type,profiles!posts_author_id_fkey(full_name,avatar_url),comments(count),reactions(count)');
     q = groupId ? q.eq('group_id', groupId) : q.is('group_id', null);
-    const [{ data: posts, error }, { data: mes }] = await Promise.all([
+    const [{ data: posts, error }, { data: mes }, { data: sv }] = await Promise.all([
       q.order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(50),
-      sb.from('reactions').select('post_id').eq('user_id', session.user.id)
+      sb.from('reactions').select('post_id').eq('user_id', session.user.id),
+      sb.from('saved_posts').select('post_id')
     ]);
+    const enreg = new Set((sv || []).map(x => x.post_id));
     liste.replaceChildren();
     if (error) return liste.append(h('p', { className: 'erreur' }, error.message));
     if (!posts.length) return liste.append(h('p', { className: 'vide' }, 'Aucune publication pour le moment. Soyez le premier à partager.'));
     const aime = new Set((mes || []).map(r => r.post_id));
     const chemins = posts.filter(p => p.media_url).map(p => p.media_url), urls = {};
     if (chemins.length) { const { data: sg } = await sb.storage.from('post-media').createSignedUrls(chemins, 3600); (sg || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; }); }
-    posts.forEach(p => liste.append(carte(p, aime.has(p.id), remplir, urls[p.media_url])));
+    posts.forEach(p => liste.append(carte(p, aime.has(p.id), remplir, urls[p.media_url], enreg.has(p.id))));
   }
   remplir();
   return box;
 }
 
-function carte(p, aime, recharger, urlImage) {
+function carte(p, aime, recharger, urlImage, enregistre) {
   let nbR = p.reactions[0]?.count || 0, nbC = p.comments[0]?.count || 0, moi = aime;
   const bR = h('button', { className: moi ? 'on' : '' });
   const bC = h('button');
@@ -211,19 +223,41 @@ function carte(p, aime, recharger, urlImage) {
     (data || []).forEach(x => c.append(h('p', {}, h('span', { className: 'auteur' }, (x.profiles?.full_name || 'Membre') + ' '), x.content, x.author_id !== session.user.id ? h('button', { className: 'btn lien discret', title: 'Plus d’options', onclick: () => confirm('Signaler ce commentaire à l’administration ?') && signaler('comment', x.id) }, '⋯') : null)));
     const champ = h('input', { placeholder: 'Écrire un commentaire…' });
     const envoi = h('button', { className: 'btn' }, 'Envoyer');
+    const ids = new Map(), choix = h('div');
+    const arobase = h('button', { className: 'btn', title: 'Identifier un membre' }, '@ Identifier');
+    arobase.onclick = async () => {
+      if (choix.childElementCount) return choix.replaceChildren();
+      const { data: mb } = await sb.from('profiles').select('id,full_name').neq('id', session.user.id).eq('status', 'actif').order('full_name').limit(80);
+      const sel = h('select', {}, h('option', { value: '' }, 'Choisir un membre…'), ...(mb || []).map(u => h('option', { value: u.id }, u.full_name || 'Sans nom')));
+      sel.onchange = () => { const u = (mb || []).find(x => x.id === sel.value); if (u) { champ.value += (champ.value && !champ.value.endsWith(' ') ? ' ' : '') + '@' + u.full_name + ' '; ids.set(u.id, u.full_name); } choix.replaceChildren(); champ.focus(); };
+      choix.append(sel);
+    };
     envoi.onclick = async () => {
       if (!champ.value.trim()) return;
-      const { error } = await sb.from('comments').insert({ post_id: p.id, content: champ.value.trim() });
+      const mentions = [...ids].filter(([, n]) => champ.value.includes('@' + n)).map(([i]) => i);
+      const { error } = await sb.from('comments').insert({ post_id: p.id, content: champ.value.trim(), mentions });
       if (error) return alert(error.message);
       nbC++; maj(); zone.replaceChildren(); bC.onclick();
     };
-    c.append(champ, envoi); zone.append(c);
+    c.append(champ, h('div', { className: 'actions' }, arobase, envoi), choix); zone.append(c);
   };
-  const mien = p.author_id === session.user.id || profile.role === 'admin';
+  let sauve = enregistre;
+  const bS = h('button', { title: 'Enregistrer sur mon compte' });
+  const majS = () => { bS.textContent = sauve ? '🔖' : '📑'; bS.className = sauve ? 'on' : ''; }; majS();
+  bS.onclick = async () => {
+    const r = sauve ? await sb.from('saved_posts').delete().eq('post_id', p.id).eq('user_id', session.user.id) : await sb.from('saved_posts').insert({ post_id: p.id });
+    if (!r.error) { sauve = !sauve; majS(); }
+  };
+  const bP = h('button', { title: 'Partager', onclick: () => partager('MNA Connect', (p.content || 'Une publication sur MNA Connect').slice(0, 120)) }, '↗️');
+  const bD = urlImage ? h('button', { title: 'Télécharger la photo', onclick: async () => {
+    const { data } = await sb.storage.from('post-media').createSignedUrl(p.media_url, 120, { download: 'photo-mna.jpg' });
+    if (data) { const a = h('a', { href: data.signedUrl }); document.body.append(a); a.click(); a.remove(); }
+  } }, '⬇️') : null;
+  const mien = p.author_id === session.user.id || can('moderer');
   const sup = mien ? h('button', { className: 'btn lien', onclick: async () => {
     if (confirm('Supprimer cette publication ?')) { if (p.media_url) await sb.storage.from('post-media').remove([p.media_url]); await sb.from('posts').delete().eq('id', p.id); recharger(); }
   } }, 'Supprimer') : null;
-  const pin = profile.role === 'admin' ? h('button', { className: 'btn lien', onclick: async () => {
+  const pin = can('publier') ? h('button', { className: 'btn lien', onclick: async () => {
     const { error } = await sb.from('posts').update({ pinned: !p.pinned }).eq('id', p.id);
     if (error) alert(error.message); else recharger();
   } }, p.pinned ? 'Désépingler' : 'Épingler') : null;
@@ -233,7 +267,7 @@ function carte(p, aime, recharger, urlImage) {
       h('div', { className: 'meta' }, (p.pinned ? 'Épinglé · ' : '') + quand(p.created_at)))), h('div', {}, pin, sup, p.author_id !== session.user.id ? h('button', { className: 'btn lien discret', title: 'Plus d’options', onclick: () => confirm('Signaler cette publication à l’administration ?') && signaler('post', p.id) }, '⋯') : null)),
     p.content ? h('p', { style: 'white-space:pre-wrap' }, p.content) : null,
     urlImage ? h('img', { src: urlImage, className: 'photo', alt: 'Photo de la publication', loading: 'lazy', onclick: () => window.open(urlImage, '_blank') }) : null,
-    h('div', { className: 'actions' }, bR, bC), zone);
+    h('div', { className: 'actions' }, bR, bC, bP, bS, bD), zone);
 }
 
 async function vueGroupes() {
@@ -300,11 +334,8 @@ async function vueProfil() {
     const f = photo.files[0]; if (!f) return;
     msg.className = 'ok'; msg.textContent = 'Envoi de la photo…';
     try {
-      const bmp = await createImageBitmap(f), c = document.createElement('canvas'), t = 320;
-      c.width = c.height = t;
-      const m = Math.min(bmp.width, bmp.height);
-      c.getContext('2d').drawImage(bmp, (bmp.width - m) / 2, (bmp.height - m) / 2, m, m, 0, 0, t, t);
-      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', .85));
+      const blob = await rogner(f);
+      if (!blob) { msg.textContent = ''; return; }
       const chemin = `${session.user.id}/avatar.jpg`;
       const up = await sb.storage.from('avatars').upload(chemin, blob, { upsert: true, contentType: 'image/jpeg' });
       if (up.error) throw up.error;
@@ -376,7 +407,7 @@ async function vueConv() {
   surPresence = majEntete;
 
   const fil = h('div', { className: 'fil' });
-  const champ = h('input', { placeholder: 'Message', enterKeyHint: 'send' });
+  const champ = h('textarea', { placeholder: 'Message', rows: 1 });
   const fichier = h('input', { type: 'file', hidden: true, accept: 'image/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip' });
   const clip = h('button', { className: 'ico', title: 'Joindre un fichier', onclick: () => fichier.click() }, '📎');
   const action = h('button', { className: 'rond' }, '🎤');
@@ -461,11 +492,10 @@ async function vueConv() {
   };
   const envoyerTexte = async () => {
     const t = champ.value.trim(); if (!t) return;
-    champ.value = ''; majAction(); tape(false);
+    champ.value = ''; champ.style.height = 'auto'; majAction(); tape(false);
     if (!await poster({ kind: 'texte', content: t })) { champ.value = t; majAction(); }
   };
-  champ.oninput = () => { majAction(); if (champ.value.trim()) { tape(true); clearTimeout(minuteurEcrit); minuteurEcrit = setTimeout(() => tape(false), 2500); } else tape(false); };
-  champ.onkeydown = e => { if (e.key === 'Enter') envoyerTexte(); };
+  champ.oninput = () => { champ.style.height = 'auto'; champ.style.height = Math.min(champ.scrollHeight, 120) + 'px'; majAction(); if (champ.value.trim()) { tape(true); clearTimeout(minuteurEcrit); minuteurEcrit = setTimeout(() => tape(false), 2500); } else tape(false); };
 
   fichier.onchange = async () => {
     const f = fichier.files[0]; fichier.value = ''; if (!f) return;
@@ -543,6 +573,9 @@ async function vueConv() {
 
 // ---------- Section « Plus » ----------
 const admin = () => profile?.role === 'admin';
+const can = p => profile?.role === 'admin' || perms.has(p);
+const PERM_TABLE = { announcements: 'annonces', videos: 'videos', teachings: 'enseignements', events: 'agenda', churches: 'assemblees', meditations: 'meditations' };
+const PERMS = [['publier', 'Publier à l’accueil et épingler'], ['annonces', 'Annonces'], ['videos', 'Vidéothèque et directs'], ['enseignements', 'Enseignements'], ['agenda', 'Agenda'], ['meditations', 'Méditation du jour'], ['assemblees', 'Assemblées'], ['groupes', 'Communautés (créer, supprimer)'], ['bibliotheque', 'Lien de la bibliothèque'], ['moderer', 'Modération : signalements, suppressions, suspensions']];
 const lab = (liste, v) => (liste.find(x => x[0] === v) || [v, v])[1];
 const CAT_ANN = [['generale', 'Générale'], ['reunion', 'Réunion'], ['culte', 'Culte'], ['conference', 'Conférence'], ['formation', 'Formation'], ['evenement', 'Événement'], ['important', 'Important']];
 const CAT_VID = [['culte', 'Cultes'], ['predication', 'Prédications'], ['enseignement', 'Enseignements'], ['conference', 'Conférences'], ['formation', 'Formations'], ['temoignage', 'Témoignages']];
@@ -552,7 +585,7 @@ const ytId = u => (String(u).match(/(?:v=|youtu\.be\/|embed\/|live\/|shorts\/)([
 
 const retour = titre => h('div', { className: 'qui', style: 'margin-bottom:.8rem' },
   h('button', { className: 'btn lien', onclick: () => { sous = null; afficher(); } }, '‹ Plus'), h('h2', {}, titre));
-const supprimer = (table, id) => admin() ? h('button', { className: 'btn lien', onclick: async () => {
+const supprimer = (table, id) => can(PERM_TABLE[table]) ? h('button', { className: 'btn lien', onclick: async () => {
   if (confirm('Supprimer définitivement ?')) { await sb.from(table).delete().eq('id', id); afficher(); } } }, 'Supprimer') : null;
 
 function formulaire(titre, table, champs) {
@@ -569,7 +602,7 @@ function formulaire(titre, table, champs) {
       if (c.type === 'datetime-local' && v) v = new Date(v).toISOString();
       if (c.transform) v = c.transform(v);
       if (v === '' || v == null) { if (c.requis) { msg.textContent = `${c.label} : valeur manquante ou invalide`; return; } v = null; }
-      row[c.k] = v;
+      if (v !== null) row[c.k] = v;
     }
     bt.disabled = true; const { error } = await sb.from(table).insert(row); bt.disabled = false;
     if (error) msg.textContent = error.message; else afficher();
@@ -601,12 +634,15 @@ function vignette(id) {
 
 const SECTIONS = {
   recherche: ['🔍 Recherche', () => vueRecherche()],
+  meditations: ['🌅 Méditation du jour', () => vueMeditations()],
   annonces: ['📢 Annonces', () => vueAnnonces()],
   videos: ['🎥 Vidéothèque et direct', () => vueVideos()],
   enseignements: ['📖 Enseignements du Dr S-J Nepios', () => vueEnseignements()],
   agenda: ['📅 Agenda', () => vueAgenda()],
   priere: ['🙏 Espace de prière', () => vuePriere()],
   assemblees: ['⛪ Nos assemblées', () => vueAssemblees()],
+  enregistres: ['🔖 Publications enregistrées', () => vueEnregistres()],
+  inviter: ['📲 Inviter quelqu’un à installer l’app', () => vueInviter()],
   bibliotheque: ['📚 Bibliothèque numérique', () => vueBibliotheque()],
   notifications: ['🔔 Notifications', () => vueNotifs()],
   signalements: ['🚩 Signalements', () => vueSignalements()],
@@ -614,16 +650,17 @@ const SECTIONS = {
 };
 
 async function vuePlus() {
-  if (sous && SECTIONS[sous]) return SECTIONS[sous][1]();
+  if (sous && SECTIONS[sous]) { sb.rpc('marquer_section', { sec: sous }).then(() => majBadges()); return SECTIONS[sous][1](); }
+  const { data } = await sb.rpc('nouveautes'); nouv = Object.fromEntries((data || []).map(x => [x.section, Number(x.n)]));
   const box = h('div', { className: 'menu' }, h('h2', { style: 'margin-bottom:.8rem' }, 'Plus'));
-  Object.entries(SECTIONS).filter(([k]) => !['admin', 'signalements'].includes(k) || admin()).forEach(([k, [titre]]) =>
-    box.append(h('button', { className: 'btn', onclick: () => { sous = k; afficher(); } }, titre)));
+  Object.entries(SECTIONS).filter(([k]) => k === 'admin' ? (admin() || can('groupes')) : k === 'signalements' ? can('moderer') : true).forEach(([k, [titre]]) =>
+    box.append(h('button', { className: 'btn', onclick: () => { sous = k; afficher(); } }, h('span', {}, titre), nouv[k] > 0 ? h('span', { className: 'pastille rouge' }, 'Nouveau · ' + nouv[k]) : null)));
   return box;
 }
 
 async function vueAnnonces() {
   const box = h('div', {}, retour('Annonces'));
-  if (admin()) box.append(formulaire('Nouvelle annonce', 'announcements', [
+  if (can('annonces')) box.append(formulaire('Nouvelle annonce', 'announcements', [
     { k: 'title', label: 'Titre', requis: 1 }, { k: 'body', label: 'Message', type: 'textarea' },
     { k: 'category', label: 'Type', type: 'select', options: CAT_ANN }, { k: 'pinned', label: 'Mettre en évidence', type: 'checkbox' }]));
   await listeFiltree(box, sb.from('announcements').select('*').order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(60),
@@ -636,7 +673,7 @@ async function vueAnnonces() {
 
 async function vueVideos() {
   const box = h('div', {}, retour('Vidéothèque et direct'));
-  if (admin()) box.append(formulaire('Ajouter une vidéo ou un direct', 'videos', [
+  if (can('videos')) box.append(formulaire('Ajouter une vidéo ou un direct', 'videos', [
     { k: 'title', label: 'Titre', requis: 1 }, { k: 'youtube_id', label: 'Lien YouTube', requis: 1, transform: ytId },
     { k: 'speaker', label: 'Intervenant' }, { k: 'category', label: 'Catégorie', type: 'select', options: CAT_VID },
     { k: 'published_on', label: 'Date', type: 'date' }, { k: 'description', label: 'Description', type: 'textarea' },
@@ -653,7 +690,7 @@ async function vueVideos() {
 
 async function vueEnseignements() {
   const box = h('div', {}, retour('Enseignements du Dr S-J Nepios'));
-  if (admin()) box.append(formulaire('Ajouter un enseignement', 'teachings', [
+  if (can('enseignements')) box.append(formulaire('Ajouter un enseignement', 'teachings', [
     { k: 'title', label: 'Titre', requis: 1 }, { k: 'series', label: 'Série', type: 'select', options: SERIES },
     { k: 'kind', label: 'Format', type: 'select', options: [['article', 'Texte'], ['video', 'Vidéo YouTube'], ['pdf', 'Document PDF']] },
     { k: 'url', label: 'Lien (YouTube ou PDF)', type: 'url' }, { k: 'description', label: 'Description', type: 'textarea' },
@@ -670,7 +707,7 @@ async function vueEnseignements() {
 
 async function vueAgenda() {
   const box = h('div', {}, retour('Agenda'));
-  if (admin()) box.append(formulaire('Nouvel événement', 'events', [
+  if (can('agenda')) box.append(formulaire('Nouvel événement', 'events', [
     { k: 'title', label: 'Titre', requis: 1 }, { k: 'category', label: 'Type', type: 'select', options: CAT_EVT },
     { k: 'starts_at', label: 'Date et heure', type: 'datetime-local', requis: 1 }, { k: 'location', label: 'Lieu' },
     { k: 'responsable', label: 'Responsable' }, { k: 'link', label: 'Lien (facultatif)', type: 'url' }, { k: 'description', label: 'Description', type: 'textarea' }]));
@@ -712,7 +749,7 @@ async function vuePriere() {
       const x = moi ? await sb.from('prayer_supports').delete().eq('request_id', r.id).eq('user_id', session.user.id) : await sb.from('prayer_supports').insert({ request_id: r.id });
       if (!x.error) { moi = !moi; n += moi ? 1 : -1; maj(); }
     };
-    const sup = (r.author_id === session.user.id || admin()) ? h('button', { className: 'btn lien', onclick: async () => {
+    const sup = (r.author_id === session.user.id || can('moderer')) ? h('button', { className: 'btn lien', onclick: async () => {
       if (confirm('Supprimer cette demande ?')) { await sb.from('prayer_requests').delete().eq('id', r.id); afficher(); } } }, 'Supprimer') : null;
     box.append(h('article', { className: 'card' }, h('div', { className: 'ligne' }, h('div', { className: 'qui' }, av(r.profiles?.avatar_url, r.profiles?.full_name, 36),
       h('div', {}, h('div', { className: 'auteur' }, r.profiles?.full_name || 'Membre'), h('div', { className: 'meta' }, quand(r.created_at) + (r.visibility === 'public' ? '' : r.visibility === 'prive' ? ' · Privée' : ' · Groupe')))), sup),
@@ -729,7 +766,7 @@ async function vueBibliotheque() {
       h('p', {}, 'Livres, documents et ressources du Ministère de la Nouvelle Alliance et de l’École Biblique Kainos.'),
       h('a', { className: 'btn primaire', href: url, target: '_blank', rel: 'noopener' }, 'Ouvrir la bibliothèque'))
     : h('p', { className: 'vide' }, 'Le lien de la bibliothèque sera bientôt disponible.'));
-  if (admin()) {
+  if (can('bibliotheque')) {
     const champ = h('input', { type: 'url', placeholder: 'https://…', value: url || '' }), msg = h('p', { className: 'ok' });
     box.append(h('div', { className: 'card' }, h('h3', {}, 'Adresse du site de la bibliothèque'), champ, msg,
       h('button', { className: 'btn primaire', onclick: async () => {
@@ -793,7 +830,7 @@ async function vueSignalements() {
 
 async function vueAssemblees() {
   const box = h('div', {}, retour('Nos assemblées'));
-  if (admin()) box.append(formulaire('Nouvelle assemblée', 'churches', [
+  if (can('assemblees')) box.append(formulaire('Nouvelle assemblée', 'churches', [
     { k: 'name', label: 'Nom de l’assemblée', requis: 1 }, { k: 'city', label: 'Ville' }, { k: 'country', label: 'Pays' },
     { k: 'address', label: 'Adresse' }, { k: 'leader_name', label: 'Responsable' }, { k: 'service_times', label: 'Horaires des cultes' },
     { k: 'description', label: 'Description', type: 'textarea' }]));
@@ -854,6 +891,231 @@ async function vueRecherche() {
   box.append(champ, zone); return box;
 }
 
+// ---------- Partage / invitation ----------
+async function partager(titre, texte) {
+  const url = location.origin + location.pathname;
+  if (navigator.share) { try { await navigator.share({ title: titre, text: texte, url }); } catch (_) {} }
+  else { try { await navigator.clipboard.writeText(texte + ' ' + url); alert('Lien copié. Collez-le dans la discussion de votre choix.'); } catch (_) { prompt('Copiez ce lien :', url); } }
+}
+async function vueInviter() {
+  const box = h('div', {}, retour('Inviter à installer l’application'));
+  const url = location.origin + location.pathname;
+  const texte = 'Rejoins MNA Connect, le réseau de la Nouvelle Alliance ! Ouvre ce lien et installe l’application sur ton téléphone :';
+  const lien = (nom, href) => h('a', { className: 'btn', href, target: '_blank', rel: 'noopener' }, nom);
+  box.append(h('div', { className: 'card' },
+    h('p', {}, 'Appuyez sur le bouton : votre téléphone propose WhatsApp, Telegram, Facebook, TikTok et vos autres applications. Choisissez-en une, puis la personne. Elle n’a qu’à ouvrir le lien et installer l’application.'),
+    h('button', { className: 'btn primaire', style: 'width:100%', onclick: () => partager('MNA Connect', texte) }, '📤 Envoyer l’invitation')),
+    h('div', { className: 'card' }, h('p', { className: 'meta' }, 'Si le bouton ne propose rien, utilisez directement :'),
+      h('div', { className: 'actions', style: 'flex-wrap:wrap' },
+        lien('WhatsApp', 'https://wa.me/?text=' + encodeURIComponent(texte + ' ' + url)),
+        lien('Telegram', 'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(texte)),
+        lien('Facebook', 'https://www.facebook.com/sharer/sharer.php?u=' + encodeURIComponent(url)),
+        h('button', { className: 'btn', onclick: async () => { try { await navigator.clipboard.writeText(url); alert('Lien copié.'); } catch (_) { prompt('Copiez ce lien :', url); } } }, 'Copier le lien'))));
+  return box;
+}
+
+// ---------- Méditation du jour ----------
+async function vueMeditations() {
+  const box = h('div', {}, retour('Méditation du jour'));
+  if (can('meditations')) box.append(formulaire('Nouvelle méditation', 'meditations', [
+    { k: 'title', label: 'Titre', requis: 1 }, { k: 'verse', label: 'Verset ou référence biblique' },
+    { k: 'for_date', label: 'Date de publication', type: 'date' }, { k: 'body', label: 'Méditation', type: 'textarea', requis: 1 }]));
+  const aujourdhui = new Date().toLocaleDateString('en-CA');
+  const { data, error } = await sb.from('meditations').select('*').lte('for_date', aujourdhui).order('for_date', { ascending: false }).order('created_at', { ascending: false }).limit(60);
+  if (error) return box.append(h('p', { className: 'erreur' }, error.message)), box;
+  if (!data.length) box.append(h('p', { className: 'vide' }, 'La méditation du jour sera publiée ici par la direction.'));
+  data.forEach(m => box.append(h('article', { className: 'card' + (m.for_date === aujourdhui ? ' epingle' : '') },
+    h('div', { className: 'ligne' }, h('div', { className: 'meta' }, (m.for_date === aujourdhui ? 'Aujourd’hui · ' : '') + new Date(m.for_date + 'T12:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })), supprimer('meditations', m.id)),
+    h('h3', { style: 'margin:.3rem 0' }, m.title), m.verse ? h('p', { className: 'meta', style: 'font-style:italic' }, m.verse) : null,
+    h('p', { style: 'white-space:pre-wrap' }, m.body),
+    h('div', { className: 'actions' }, h('button', { onclick: () => partager('Méditation du jour', m.title + ' — ' + (m.verse || '')) }, '↗️ Partager')))));
+  return box;
+}
+
+// ---------- Publications enregistrées ----------
+async function vueEnregistres() {
+  const box = h('div', {}, retour('Publications enregistrées'));
+  const { data, error } = await sb.from('saved_posts').select('post_id,posts(id,content,created_at,media_url,profiles!posts_author_id_fkey(full_name,avatar_url))').order('created_at', { ascending: false });
+  if (error) return box.append(h('p', { className: 'erreur' }, error.message)), box;
+  const liste = (data || []).filter(x => x.posts);
+  if (!liste.length) box.append(h('p', { className: 'vide' }, 'Rien d’enregistré. Appuyez sur 📑 sous une publication pour la retrouver ici.'));
+  const chemins = liste.map(x => x.posts.media_url).filter(Boolean), urls = {};
+  if (chemins.length) { const { data: sg } = await sb.storage.from('post-media').createSignedUrls(chemins, 3600); (sg || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; }); }
+  liste.forEach(({ posts: p }) => box.append(h('article', { className: 'card' },
+    h('div', { className: 'ligne' }, h('div', { className: 'qui' }, av(p.profiles?.avatar_url, p.profiles?.full_name, 36), h('div', {}, h('div', { className: 'auteur' }, p.profiles?.full_name || 'Membre'), h('div', { className: 'meta' }, quand(p.created_at)))),
+      h('button', { className: 'btn lien', onclick: async () => { await sb.from('saved_posts').delete().eq('post_id', p.id).eq('user_id', session.user.id); afficher(); } }, 'Retirer')),
+    p.content ? h('p', { style: 'white-space:pre-wrap' }, p.content) : null,
+    urls[p.media_url] ? h('img', { src: urls[p.media_url], className: 'photo', alt: '', loading: 'lazy', onclick: () => window.open(urls[p.media_url], '_blank') }) : null)));
+  return box;
+}
+
+// ---------- Recadrage de la photo de profil ----------
+function rogner(file) {
+  return new Promise(async resolve => {
+    let bmp; try { bmp = await createImageBitmap(file); } catch (_) { alert('Image non lisible. Essayez une photo JPEG ou PNG.'); return resolve(null); }
+    const T = 300;
+    let s = Math.max(T / bmp.width, T / bmp.height); const min = s; let ox = (T - bmp.width * s) / 2, oy = (T - bmp.height * s) / 2;
+    const cv = h('canvas', { width: T, height: T, className: 'rogne-cv' }), ctx = cv.getContext('2d');
+    const curseur = h('input', { type: 'range', min: 1, max: 4, step: .01, value: 1 });
+    const dessiner = () => { ox = Math.min(0, Math.max(T - bmp.width * s, ox)); oy = Math.min(0, Math.max(T - bmp.height * s, oy)); ctx.clearRect(0, 0, T, T); ctx.drawImage(bmp, ox, oy, bmp.width * s, bmp.height * s); };
+    const zoom = ns => { ns = Math.min(min * 4, Math.max(min, ns)); const c = T / 2; ox = c - (c - ox) * ns / s; oy = c - (c - oy) * ns / s; s = ns; curseur.value = s / min; dessiner(); };
+    curseur.oninput = () => zoom(min * Number(curseur.value));
+    const pts = new Map(); let d0 = 0;
+    cv.onpointerdown = e => { cv.setPointerCapture(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]); if (pts.size === 2) { const [a, b] = [...pts.values()]; d0 = Math.hypot(a[0] - b[0], a[1] - b[1]); } };
+    cv.onpointermove = e => {
+      if (!pts.has(e.pointerId)) return;
+      const prev = pts.get(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]);
+      if (pts.size === 2) { const [a, b] = [...pts.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (d0) zoom(s * d / d0); d0 = d; }
+      else { ox += e.clientX - prev[0]; oy += e.clientY - prev[1]; dessiner(); }
+    };
+    cv.onpointerup = cv.onpointercancel = e => { pts.delete(e.pointerId); d0 = 0; };
+    cv.onwheel = e => { e.preventDefault(); zoom(s * (e.deltaY < 0 ? 1.08 : .93)); };
+    const fin = v => { modale.remove(); resolve(v); };
+    const ok = h('button', { className: 'btn primaire' }, 'Valider');
+    ok.onclick = () => { const o = document.createElement('canvas'); o.width = o.height = 360; o.getContext('2d').drawImage(cv, 0, 0, T, T, 0, 0, 360, 360); o.toBlob(b => fin(b), 'image/jpeg', .9); };
+    const modale = h('div', { className: 'modale' }, h('div', { className: 'rogne' }, h('h3', {}, 'Cadrez votre photo'),
+      h('p', { className: 'meta' }, 'Déplacez l’image avec le doigt. Zoomez avec deux doigts ou avec le curseur. La partie dans le cercle sera visible.'),
+      h('div', { className: 'rogne-zone' }, cv, h('div', { className: 'rogne-masque' })), curseur,
+      h('div', { className: 'actions', style: 'justify-content:flex-end' }, h('button', { className: 'btn', onclick: () => fin(null) }, 'Annuler'), ok)));
+    document.body.append(modale); dessiner();
+  });
+}
+
+// ---------- Statuts (24 h) ----------
+const FONDS = ['#16284a', '#7a3b2e', '#2e6b4f', '#5b3a82', '#b8863a', '#2b2b2b'];
+async function barreStatuts() {
+  const barre = h('div', { className: 'stories' });
+  const [{ data: sts }, { data: vus }] = await Promise.all([
+    sb.from('statuses').select('id,author_id,kind,content,bg,media_path,created_at,profiles!statuses_author_id_fkey(full_name,avatar_url)').order('created_at'),
+    sb.from('status_views').select('status_id').eq('viewer_id', session.user.id)]);
+  const vu = new Set((vus || []).map(v => v.status_id)), par = new Map();
+  (sts || []).forEach(x => { if (!par.has(x.author_id)) par.set(x.author_id, []); par.get(x.author_id).push(x); });
+  const moi = par.get(session.user.id) || [];
+  barre.append(h('div', { className: 'story' },
+    h('div', { className: 'anneau' + (moi.length ? '' : ' vide'), onclick: () => moi.length ? ouvrirVisionneuse(moi, new Set(moi.map(x => x.id))) : creerStatut() },
+      av(profile.avatar_url, profile.full_name, 56), h('span', { className: 'plus', onclick: e => { e.stopPropagation(); creerStatut(); } }, '+')),
+    h('div', { className: 'meta coupe' }, 'Mon statut')));
+  [...par.entries()].filter(([id]) => id !== session.user.id)
+    .sort((a, b) => Number(b[1].some(x => !vu.has(x.id))) - Number(a[1].some(x => !vu.has(x.id))))
+    .forEach(([, liste]) => { const p = liste[0].profiles, neuf = liste.some(x => !vu.has(x.id));
+      barre.append(h('div', { className: 'story', onclick: () => ouvrirVisionneuse(liste, vu) },
+        h('div', { className: 'anneau' + (neuf ? '' : ' vu') }, av(p?.avatar_url, p?.full_name, 56)), h('div', { className: 'meta coupe' }, (p?.full_name || 'Membre').split(' ')[0]))); });
+  return barre;
+}
+
+function creerStatut() {
+  let fond = 0, fichier = null, type = 'texte';
+  const zoneTexte = h('textarea', { placeholder: 'Écrivez votre statut…', maxLength: 300, rows: 5 });
+  const apercu = h('div', { className: 'st-apercu', style: `background:${FONDS[0]}` }, zoneTexte);
+  const legende = h('input', { placeholder: 'Ajouter une légende (facultatif)', style: 'display:none' });
+  const msg = h('p', { className: 'erreur' });
+  const input = h('input', { type: 'file', accept: 'image/*,video/*', hidden: true });
+  const fin = () => modale.remove();
+  const couleur = h('button', { className: 'btn', onclick: () => { if (type !== 'texte') return; fond = (fond + 1) % FONDS.length; apercu.style.background = FONDS[fond]; } }, '🎨 Couleur');
+  input.onchange = async () => {
+    const f = input.files[0]; if (!f) return; msg.textContent = '';
+    if (f.type.startsWith('video/')) {
+      if (f.size > 20 * 1024 * 1024) { msg.textContent = 'Vidéo trop lourde (20 Mo maximum).'; return; }
+      const v = document.createElement('video'); v.preload = 'metadata'; v.src = URL.createObjectURL(f);
+      await new Promise(r => { v.onloadedmetadata = r; v.onerror = r; });
+      if (v.duration > 60) { msg.textContent = 'Vidéo trop longue (60 secondes maximum).'; return; }
+      type = 'video'; apercu.replaceChildren(h('video', { src: v.src, muted: true, playsInline: true, controls: true, style: 'max-width:100%;max-height:50vh' }));
+    } else { type = 'image'; apercu.replaceChildren(h('img', { src: URL.createObjectURL(f), style: 'max-width:100%;max-height:50vh' })); }
+    apercu.style.background = '#000'; fichier = f; legende.style.display = ''; couleur.style.display = 'none';
+  };
+  const publier = h('button', { className: 'btn primaire' }, 'Publier mon statut (24 h)');
+  publier.onclick = async () => {
+    msg.textContent = ''; publier.disabled = true;
+    try {
+      let ligne;
+      if (type === 'texte') { const t = zoneTexte.value.trim(); if (!t) throw new Error('Écrivez un texte ou choisissez une photo ou vidéo.'); ligne = { kind: 'texte', content: t, bg: FONDS[fond] }; }
+      else {
+        let blob = fichier, mime = fichier.type, ext = 'mp4';
+        if (type === 'image') { blob = await reduireImage(fichier); mime = 'image/jpeg'; ext = 'jpg'; } else ext = mime.includes('webm') ? 'webm' : mime.includes('quicktime') ? 'mov' : 'mp4';
+        const chemin = `${session.user.id}/${crypto.randomUUID()}.${ext}`;
+        const up = await sb.storage.from('statuts').upload(chemin, blob, { contentType: mime }); if (up.error) throw up.error;
+        ligne = { kind: type, media_path: chemin, content: legende.value.trim() || null };
+      }
+      const { error } = await sb.from('statuses').insert(ligne); if (error) throw error;
+      fin(); afficher();
+    } catch (e) { msg.textContent = e.message || 'Échec de la publication'; }
+    publier.disabled = false;
+  };
+  const modale = h('div', { className: 'modale' }, h('div', { className: 'rogne' }, h('h3', {}, 'Nouveau statut'), apercu, legende, msg,
+    h('div', { className: 'actions', style: 'flex-wrap:wrap' }, couleur, h('button', { className: 'btn', onclick: () => input.click() }, '📷 Photo ou vidéo'), input),
+    h('div', { className: 'actions', style: 'justify-content:flex-end' }, h('button', { className: 'btn', onclick: fin }, 'Annuler'), publier)));
+  document.body.append(modale);
+}
+
+async function ouvrirVisionneuse(liste, vus) {
+  const me = session.user.id;
+  let i = Math.max(0, liste.findIndex(x => !vus.has(x.id))), minuteur = null, video = null;
+  const racine = h('div', { className: 'visionneuse' });
+  const fermer = () => { clearTimeout(minuteur); video?.pause(); racine.remove(); afficher(); };
+  const { data: ml } = await sb.from('status_likes').select('status_id').eq('user_id', me).in('status_id', liste.map(x => x.id));
+  const aimes = new Set((ml || []).map(x => x.status_id));
+  function montrer(k) {
+    clearTimeout(minuteur); video?.pause(); video = null;
+    if (k >= liste.length) return fermer();
+    i = Math.max(0, k); const s = liste[i], mien = s.author_id === me;
+    const barres = h('div', { className: 'barres' }, ...liste.map((_, j) => h('div', { className: 'barre' }, h('div', { className: j < i ? 'plein' : '' }))));
+    const jauge = barres.children[i].firstChild;
+    const duree = d => { jauge.style.transition = `width ${d}s linear`; requestAnimationFrame(() => requestAnimationFrame(() => { jauge.style.width = '100%'; })); };
+    const suivant = d => { duree(d); minuteur = setTimeout(() => montrer(i + 1), d * 1000); };
+    let corps;
+    if (s.kind === 'texte') { corps = h('div', { className: 'st-texte', style: `background:${s.bg || FONDS[0]}` }, h('div', {}, s.content)); suivant(6); }
+    else {
+      corps = h('div', { className: 'st-media' });
+      urlSignee('statuts', s.media_path).then(u => {
+        if (!u || liste[i] !== s) return;
+        if (s.kind === 'image') { corps.prepend(h('img', { src: u })); suivant(6); }
+        else { video = h('video', { src: u, autoplay: true, playsInline: true }); video.onloadedmetadata = () => duree(video.duration || 10); video.onended = () => montrer(i + 1); corps.prepend(video); }
+      });
+      if (s.content) corps.append(h('div', { className: 'legende' }, s.content));
+    }
+    const p = s.profiles;
+    const entete = h('div', { className: 'st-tete' }, av(mien ? profile.avatar_url : p?.avatar_url, mien ? profile.full_name : p?.full_name, 36),
+      h('div', { style: 'flex:1;min-width:0' }, h('div', { className: 'coupe', style: 'font-weight:600' }, mien ? 'Mon statut' : p?.full_name || 'Membre'), h('div', { style: 'font-size:.78rem;opacity:.8' }, jourHeure(s.created_at))),
+      mien || can('moderer') ? h('button', { className: 'st-btn', title: 'Supprimer', onclick: async () => {
+        if (!confirm('Supprimer ce statut ?')) return;
+        if (s.media_path) await sb.storage.from('statuts').remove([s.media_path]);
+        await sb.from('statuses').delete().eq('id', s.id); fermer(); } }, '🗑️') : null,
+      h('button', { className: 'st-btn', onclick: fermer }, '✕'));
+    const gauche = h('div', { className: 'tap g', onclick: () => montrer(i - 1) }), droite = h('div', { className: 'tap d', onclick: () => montrer(i + 1) });
+    let pied;
+    if (mien) {
+      pied = h('div', { className: 'st-pied' }, h('button', { className: 'btn', onclick: async () => {
+        clearTimeout(minuteur); video?.pause();
+        const [{ data: vv }, { data: ll }] = await Promise.all([
+          sb.from('status_views').select('viewer_id,viewed_at,profiles!status_views_viewer_id_fkey(full_name,avatar_url)').eq('status_id', s.id).order('viewed_at', { ascending: false }),
+          sb.from('status_likes').select('user_id').eq('status_id', s.id)]);
+        const aime = new Set((ll || []).map(x => x.user_id));
+        const panneau = h('div', { className: 'panneau' }, h('div', { className: 'ligne' }, h('b', {}, `👁 ${vv?.length || 0} vue(s) · ❤️ ${aime.size}`), h('button', { className: 'btn lien', onclick: () => { panneau.remove(); montrer(i); } }, 'Fermer')),
+          ...(vv || []).map(x => h('div', { className: 'qui com' }, av(x.profiles?.avatar_url, x.profiles?.full_name, 32), h('span', { style: 'flex:1' }, x.profiles?.full_name || 'Membre'), aime.has(x.viewer_id) ? '❤️' : null, h('span', { className: 'meta' }, heureCourte(x.viewed_at)))));
+        racine.append(panneau);
+      } }, '👁 Qui a vu mon statut ?'));
+    } else {
+      sb.from('status_views').insert({ status_id: s.id });
+      const champ = h('input', { placeholder: 'Répondre…' });
+      champ.onfocus = () => { clearTimeout(minuteur); video?.pause(); };
+      const like = h('button', { className: 'st-btn' }, aimes.has(s.id) ? '❤️' : '🤍');
+      like.onclick = async () => { const r = aimes.has(s.id) ? await sb.from('status_likes').delete().eq('status_id', s.id).eq('user_id', me) : await sb.from('status_likes').insert({ status_id: s.id }); if (!r.error) { aimes.has(s.id) ? aimes.delete(s.id) : aimes.add(s.id); like.textContent = aimes.has(s.id) ? '❤️' : '🤍'; } };
+      const envoi = h('button', { className: 'st-btn', title: 'Envoyer la réponse' }, '➤');
+      envoi.onclick = async () => {
+        const t = champ.value.trim(); if (!t) return;
+        const r = await sb.rpc('start_conversation', { autre: s.author_id }); if (r.error) return alert(r.error.message);
+        const cit = s.kind === 'texte' ? s.content.slice(0, 80) : s.kind === 'image' ? '📷 Photo' : '🎥 Vidéo';
+        const { error } = await sb.from('messages').insert({ conversation_id: r.data, kind: 'texte', content: `↩️ Réponse à votre statut « ${cit} »\n${t}` });
+        if (error) return alert(error.code === '42501' ? 'Message non envoyé.' : error.message);
+        champ.value = ''; toast('Réponse envoyée', 'Dans votre discussion avec ' + (p?.full_name || 'ce membre'));
+      };
+      pied = h('div', { className: 'st-pied rep' }, champ, envoi, like, h('button', { className: 'st-btn', title: 'Partager', onclick: () => partager('MNA Connect', 'Découvre les statuts sur MNA Connect') }, '↗️'));
+    }
+    racine.replaceChildren(barres, entete, corps, gauche, droite, pied);
+  }
+  document.body.append(racine); montrer(i);
+}
+
 async function vueAdmin() {
   const box = h('div', {}, retour('Administration'));
   const compte = t => sb.from(t).select('id', { count: 'exact', head: true }).then(r => r.count ?? 0);
@@ -885,19 +1147,35 @@ async function vueAdmin() {
     } }, 'Supprimer'))));
   box.append(lg);
 
-  const { data: us } = await sb.from('profiles').select('id,full_name,role,status').order('created_at');
-  const lm = h('div', { className: 'card' }, h('h3', {}, `Membres (${us?.length || 0})`));
-  (us || []).forEach(u => {
-    const soi = u.id === session.user.id;
-    const role = h('select', { disabled: soi, style: 'margin:.3rem 0' },
-      ...['membre', 'responsable', 'admin'].map(r => h('option', { value: r, selected: u.role === r }, r)));
-    role.onchange = async () => { const { error } = await sb.from('profiles').update({ role: role.value }).eq('id', u.id); if (error) alert(error.message); };
-    const susp = soi ? null : h('button', { className: 'btn lien', onclick: async () => {
-      await sb.from('profiles').update({ status: u.status === 'actif' ? 'suspendu' : 'actif' }).eq('id', u.id); afficher();
-    } }, u.status === 'actif' ? 'Suspendre' : 'Réactiver');
-    lm.append(h('div', { className: 'com' }, h('div', { className: 'auteur' }, (u.full_name || 'Sans nom') + (u.status === 'suspendu' ? ' (suspendu)' : '')), h('div', { className: 'ligne' }, role, susp)));
-  });
-  box.append(lm);
+  if (admin() || can('moderer')) {
+    const { data: us } = await sb.from('profiles').select('id,full_name,role,status').order('created_at');
+    const { data: pr } = admin() ? await sb.from('admin_permissions').select('user_id,permission') : { data: [] };
+    const droits = {}; (pr || []).forEach(x => { (droits[x.user_id] = droits[x.user_id] || new Set()).add(x.permission); });
+    const lm = h('div', { className: 'card' }, h('h3', {}, `Membres (${us?.length || 0})`));
+    if (admin()) lm.append(h('p', { className: 'meta' }, 'Touchez « Droits » pour nommer un administrateur délégué et choisir précisément ce qu’il peut faire. Vous accordez des droits parmi ceux que vous possédez.'));
+    (us || []).forEach(u => {
+      const soi = u.id === session.user.id, principal = u.role === 'admin', zone = h('div');
+      const susp = soi || principal || !can('moderer') ? null : h('button', { className: 'btn lien', onclick: async () => {
+        const { error } = await sb.from('profiles').update({ status: u.status === 'actif' ? 'suspendu' : 'actif' }).eq('id', u.id); if (error) alert(error.message); else afficher(); } }, u.status === 'actif' ? 'Suspendre' : 'Réactiver');
+      const bDroits = admin() && !soi && !principal ? h('button', { className: 'btn', onclick: () => {
+        if (zone.childElementCount) return zone.replaceChildren();
+        const cases = PERMS.map(([k, l]) => { const c = h('input', { type: 'checkbox', checked: !!droits[u.id]?.has(k) }); return [k, c, h('label', { className: 'check' }, c, l)]; });
+        const enr = h('button', { className: 'btn primaire' }, 'Enregistrer les droits');
+        enr.onclick = async () => {
+          const choisis = cases.filter(([, c]) => c.checked).map(([k]) => k);
+          await sb.from('admin_permissions').delete().eq('user_id', u.id);
+          if (choisis.length) { const r = await sb.from('admin_permissions').insert(choisis.map(permission => ({ user_id: u.id, permission }))); if (r.error) return alert(r.error.message); }
+          const r2 = await sb.from('profiles').update({ role: choisis.length ? 'responsable' : 'membre' }).eq('id', u.id);
+          if (r2.error) return alert(r2.error.message); afficher();
+        };
+        zone.append(h('div', { className: 'card' }, ...cases.map(x => x[2]), enr));
+      } }, 'Droits') : null;
+      const etiquette = principal ? 'Administrateur principal' : u.role === 'responsable' ? `Administrateur délégué (${droits[u.id]?.size ?? '…'} droit${(droits[u.id]?.size || 0) > 1 ? 's' : ''})` : 'Membre';
+      lm.append(h('div', { className: 'com' }, h('div', { className: 'auteur' }, (u.full_name || 'Sans nom') + (u.status === 'suspendu' ? ' (suspendu)' : '')),
+        h('div', { className: 'ligne' }, h('span', { className: 'meta' }, etiquette), h('span', {}, bDroits, susp)), zone));
+    });
+    box.append(lm);
+  }
   return box;
 }
 
@@ -906,7 +1184,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 let canalGlobal = null, audioCtx = null, invitation = null; const noms = new Map();
 const debloquerAudio = () => { try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume?.(); } catch {} };
 document.addEventListener('click', debloquerAudio); document.addEventListener('touchstart', debloquerAudio, { passive: true });
-window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); invitation = e; });
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); invitation = e; if (!session) afficher(); });
 function bip() {
   if (audioCtx) [[880, 0], [1175, .14]].forEach(([f, t]) => {
     const o = audioCtx.createOscillator(), g = audioCtx.createGain(), d = audioCtx.currentTime + t;
